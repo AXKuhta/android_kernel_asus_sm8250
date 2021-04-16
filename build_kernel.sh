@@ -19,6 +19,8 @@ export DTC_EXT=$kernel_root/dtc-aosp
 export CLANG_TRIPLE=aarch64-linux-gnu-
 export CROSS_COMPILE=$arm64_gcc_path/bin/aarch64-linux-android-
 
+# Device specific
+export ASUS_BUILD_PROJECT=ZS670KS
 make CC=clang AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip O=out -j$(nproc) "vendor/ZS670KS-perf_defconfig"
 
 echo
