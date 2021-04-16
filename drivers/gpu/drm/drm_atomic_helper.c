@@ -36,26 +36,14 @@
 #include "drm_crtc_helper_internal.h"
 #include "drm_crtc_internal.h"
 
-#ifdef ASUS_ZS661KS_PROJECT
-/* ASUS BSP Display +++ */
-struct drm_display_mode *asus_drm_display_mode;
-bool asus_first_boot = true;
-bool need_change_fps = false;
-int asus_current_fps = 144;
-bool asus_fps_overriding = false;
-
-extern bool asus_display_in_aod(void);
-/* ASUS BSP Display --- */
-
-/* ASUS BSP DP +++ */
-EXPORT_SYMBOL(asus_current_fps);
-#endif
 
 #ifdef ZS670KS
 struct drm_display_mode *asus_drm_display_mode;
 bool asus_first_boot = true;
 bool need_change_fps = true;
+EXPORT_SYMBOL(need_change_fps);
 int asus_current_fps = 90;
+EXPORT_SYMBOL(asus_current_fps);
 bool asus_first_fps_overriding = false;
 
 extern bool asus_display_in_aod(void);
@@ -63,8 +51,8 @@ extern int dsi_panel_asus_first_switch_90_fps(void);
 extern bool asus_display_in_normal_off(void);
 extern void ZS670KS_uniqie_id_get(void);
 extern void ZS670KS_display_lcd_stage_read(void);
-EXPORT_SYMBOL(asus_current_fps);
 #endif
+
 /**
  * DOC: overview
  *
@@ -606,46 +594,21 @@ drm_atomic_helper_check_modeset(struct drm_device *dev,
 
 		WARN_ON(!drm_modeset_is_locked(&crtc->mutex));
 
-#ifdef ASUS_ZS661KS_PROJECT
-		/* ASUS BSP Display +++ */
-		if (!strcmp(crtc->name, "crtc-0")) {
-			if (asus_first_boot) {
-				if (!asus_drm_display_mode) {
-					asus_drm_display_mode = kzalloc(sizeof(struct drm_display_mode), GFP_KERNEL);
-				}
-				memcpy(asus_drm_display_mode, &crtc->state->mode, sizeof(struct drm_display_mode));
-				asus_first_boot = false;
-				pr_err("[Display] primary fps (%d)\n", asus_drm_display_mode->vrefresh);
-			}
-
-			/* run time */
-			if ((old_crtc_state->enable == new_crtc_state->enable) &&
-				(old_crtc_state->active == new_crtc_state->active)) {
-				if ((asus_current_fps != new_crtc_state->mode.vrefresh) && !asus_fps_overriding) {
-					pr_err("[Display] new fps(%d), current fps(%d)\n", new_crtc_state->mode.vrefresh, asus_current_fps);
-					asus_current_fps = new_crtc_state->mode.vrefresh;
-					need_change_fps = true;
-				}
-			}
-		}
-		/* ASUS BSP Display --- */
-#endif
-
 #ifdef ZS670KS
 		if (!strcmp(crtc->name, "crtc-0")) {
 			if (asus_first_boot) {
 				if (!asus_drm_display_mode) {
 					asus_drm_display_mode = kzalloc(sizeof(struct drm_display_mode), GFP_KERNEL);
-				}
+					}
 				memcpy(asus_drm_display_mode, &crtc->state->mode, sizeof(struct drm_display_mode));
 				asus_first_boot = false;
 				pr_err("[Display] primary fps (%d)\n", asus_drm_display_mode->vrefresh);
 			}
-
+		
 			/* run time */
 			if ((old_crtc_state->enable == new_crtc_state->enable) &&
 				(old_crtc_state->active == new_crtc_state->active)) {
-
+		
 				if(!asus_display_in_normal_off() && (false == asus_first_fps_overriding)){
 					pr_err("[Display] default set fps 90\n");
 					asus_first_fps_overriding = true;
@@ -653,13 +616,13 @@ drm_atomic_helper_check_modeset(struct drm_device *dev,
 					ZS670KS_uniqie_id_get();
 					ZS670KS_display_lcd_stage_read();
 				}
-				
+						
 				if ((asus_current_fps != new_crtc_state->mode.vrefresh) && (false == asus_display_in_aod())) {
-						pr_err("[Display] new fps(%d), current fps(%d)\n", new_crtc_state->mode.vrefresh, asus_current_fps);
-						asus_current_fps = new_crtc_state->mode.vrefresh;
-						need_change_fps = true;
+					pr_err("[Display] new fps(%d), current fps(%d)\n", new_crtc_state->mode.vrefresh, asus_current_fps);
+					asus_current_fps = new_crtc_state->mode.vrefresh;
+					need_change_fps = true;
 					}
-			}
+				}
 		}
 #endif
 
@@ -667,10 +630,6 @@ drm_atomic_helper_check_modeset(struct drm_device *dev,
 			DRM_DEBUG_ATOMIC("[CRTC:%d:%s] mode changed\n",
 					 crtc->base.id, crtc->name);
 			new_crtc_state->mode_changed = true;
-#ifdef ASUS_ZS661KS_PROJECT
-			/* ASUS BSP Display, disable dfps +++ */
-			new_crtc_state->mode_changed = false;
-#endif
 
 #ifdef ZS670KS
 			/* ASUS BSP Display, disable dfps +++ */
@@ -678,28 +637,12 @@ drm_atomic_helper_check_modeset(struct drm_device *dev,
 #endif
 		}
 
-#ifdef ASUS_ZS661KS_PROJECT
-		/* ASUS BSP Display, prevent sde crash +++ */
-		if (!strcmp(crtc->name, "crtc-0") && new_crtc_state->active == 0) {
-			memcpy(&new_crtc_state->mode, asus_drm_display_mode, sizeof(struct drm_display_mode));
-			memcpy(&old_crtc_state->mode, asus_drm_display_mode, sizeof(struct drm_display_mode));
-		}
-
-		if (!strcmp(crtc->name, "crtc-0") && need_change_fps && asus_display_in_aod()) {
-			printk("[Display] skip dfps in AOD doze mode\n");
-			memcpy(&new_crtc_state->mode, asus_drm_display_mode, sizeof(struct drm_display_mode));
-			asus_current_fps = new_crtc_state->mode.vrefresh;
-			need_change_fps = false;
-		}
-		/* ASUS BSP Display, prevent sde crash --- */
-#endif
-
 #ifdef ZS670KS
 		if (!strcmp(crtc->name, "crtc-0") && new_crtc_state->active == 0) {
 			memcpy(&new_crtc_state->mode, asus_drm_display_mode, sizeof(struct drm_display_mode));
 			memcpy(&old_crtc_state->mode, asus_drm_display_mode, sizeof(struct drm_display_mode));
 		}
-		
+				
 		if (!strcmp(crtc->name, "crtc-0") && need_change_fps && asus_display_in_aod()) {
 			pr_err("[Display] skip dfps in AOD doze mode\n");
 			memcpy(&new_crtc_state->mode, asus_drm_display_mode, sizeof(struct drm_display_mode));
@@ -1388,7 +1331,6 @@ void drm_atomic_helper_commit_modeset_enables(struct drm_device *dev,
 		 * Each encoder has at most one connector (since we always steal
 		 * it away), so we won't call enable hooks twice.
 		 */
-		
 		drm_bridge_pre_enable(encoder->bridge);
 
 		if (funcs) {

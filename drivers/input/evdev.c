@@ -28,23 +28,6 @@
 #include <linux/cdev.h>
 #include "input-compat.h"
 
-// ASUS_BSP +++ Touch
-#ifdef CONFIG_TOUCHSCREEN_GOODIX_GTX8
-extern u32 GoodixTSTimeStamp;
-extern bool GoodixTSEnTimestamp;
-extern bool GoodixTSEnTimestampDebug;
-
-#define tptstamp_info(fmt, arg...)	pr_info("[TS_TimeStamp] "fmt"\n", ##arg)
-#endif
-// ASUS_BSP --- Touch
-
-enum evdev_clock_type {
-	EV_CLK_REAL = 0,
-	EV_CLK_MONO,
-	EV_CLK_BOOT,
-	EV_CLK_MAX
-};
-
 struct evdev {
 	int open;
 	struct input_handle handle;
@@ -66,7 +49,7 @@ struct evdev_client {
 	struct fasync_struct *fasync;
 	struct evdev *evdev;
 	struct list_head node;
-	unsigned int clk_type;
+	enum input_clock_type clk_type;
 	bool revoked;
 	unsigned long *evmasks[EV_CNT];
 	unsigned int bufsize;
@@ -162,17 +145,9 @@ static void __evdev_flush_queue(struct evdev_client *client, unsigned int type)
 
 static void __evdev_queue_syn_dropped(struct evdev_client *client)
 {
+	ktime_t *ev_time = input_get_timestamp(client->evdev->handle.dev);
+	struct timespec64 ts = ktime_to_timespec64(ev_time[client->clk_type]);
 	struct input_event ev;
-	ktime_t time;
-	struct timespec64 ts;
-
-	time = client->clk_type == EV_CLK_REAL ?
-			ktime_get_real() :
-			client->clk_type == EV_CLK_MONO ?
-				ktime_get() :
-				ktime_get_boottime();
-
-	ts = ktime_to_timespec64(time);
 
 	ev.input_event_sec = ts.tv_sec;
 	ev.input_event_usec = ts.tv_nsec / NSEC_PER_USEC;
@@ -202,18 +177,18 @@ static void evdev_queue_syn_dropped(struct evdev_client *client)
 static int evdev_set_clk_type(struct evdev_client *client, unsigned int clkid)
 {
 	unsigned long flags;
-	unsigned int clk_type;
+	enum input_clock_type clk_type;
 
 	switch (clkid) {
 
 	case CLOCK_REALTIME:
-		clk_type = EV_CLK_REAL;
+		clk_type = INPUT_CLK_REAL;
 		break;
 	case CLOCK_MONOTONIC:
-		clk_type = EV_CLK_MONO;
+		clk_type = INPUT_CLK_MONO;
 		break;
 	case CLOCK_BOOTTIME:
-		clk_type = EV_CLK_BOOT;
+		clk_type = INPUT_CLK_BOOT;
 		break;
 	default:
 		return -EINVAL;
@@ -252,13 +227,13 @@ static void __pass_event(struct evdev_client *client,
 		 */
 		client->tail = (client->head - 2) & (client->bufsize - 1);
 
-		client->buffer[client->tail].input_event_sec =
-						event->input_event_sec;
-		client->buffer[client->tail].input_event_usec =
-						event->input_event_usec;
-		client->buffer[client->tail].type = EV_SYN;
-		client->buffer[client->tail].code = SYN_DROPPED;
-		client->buffer[client->tail].value = 0;
+		client->buffer[client->tail] = (struct input_event) {
+			.input_event_sec = event->input_event_sec,
+			.input_event_usec = event->input_event_usec,
+			.type = EV_SYN,
+			.code = SYN_DROPPED,
+			.value = 0,
+		};
 
 		client->packet_head = client->tail;
 	}
@@ -278,16 +253,6 @@ static void evdev_pass_values(struct evdev_client *client,
 	struct input_event event;
 	struct timespec64 ts;
 	bool wakeup = false;
-// ASUS_BSP +++ Touch
-#ifdef CONFIG_TOUCHSCREEN_GOODIX_GTX8
-	static u32 GoodixPreTSTimeStamp = 0;
-	static struct timespec temp_t, prev_t;
-	u32 TimeStampDiff = 0;
-	u32 TimeStampDiffInt = 0;
-	u32 TimeStampDiffFloat = 0;
-	static bool touch_press = false;
-#endif
-// ASUS_BSP --- Touch
 
 	if (client->revoked)
 		return;
@@ -310,107 +275,6 @@ static void evdev_pass_values(struct evdev_client *client,
 
 			wakeup = true;
 		}
-		
-// ASUS_BSP +++ Touch
-#ifdef CONFIG_TOUCHSCREEN_GOODIX_GTX8
-#if 0
-		// EV_KEY = 1 / BTN_TOUCH = 330 / 1 Down : 0 UP
-		if (GoodixTSEnTimestamp == true && !strcmp(evdev->handle.name, "event8")) {
-			if((v->type == EV_KEY) && (v->code == BTN_TOUCH)) {
-				if(v->value == 1) { //Down
-					GoodixPreTSTimeStamp = GoodixTSTimeStamp;
-					temp_t.tv_sec= ts.tv_sec;
-					temp_t.tv_nsec= ts.tv_nsec;
-					touch_press = true;
-					if (GoodixTSEnTimestampDebug == true) {
-						tptstamp_info("[Start] System time : %d %ld\n", temp_t.tv_sec, temp_t.tv_nsec);
-					}
-				} else { // UP
-					TimeStampDiff = GoodixTSTimeStamp - GoodixPreTSTimeStamp;
-					event.input_event_usec = TimeStampDiff + ((temp_t.tv_nsec) / NSEC_PER_USEC);
-					TimeStampDiffInt = event.input_event_usec / 1000000;
-					TimeStampDiffFloat = event.input_event_usec - ( TimeStampDiffInt * 1000000);
-					
-					event.input_event_sec = temp_t.tv_sec + TimeStampDiffInt;
-					event.input_event_usec = TimeStampDiffFloat;
-					touch_press = false;
-					if (GoodixTSEnTimestampDebug == true) {
-						tptstamp_info("[End] DIFF : %d IC time : %d %ld\n", TimeStampDiff, event.input_event_sec, event.input_event_usec);
-					}
-				}
-			}
-			if (((v->type == EV_ABS) || (v->type == EV_SYN)) && (touch_press == true)) {
-				TimeStampDiff = GoodixTSTimeStamp - GoodixPreTSTimeStamp;
-				event.input_event_usec = TimeStampDiff + ((temp_t.tv_nsec) / NSEC_PER_USEC);
-				TimeStampDiffInt = event.input_event_usec / 1000000;
-				TimeStampDiffFloat = event.input_event_usec - ( TimeStampDiffInt * 1000000);
-
-				event.input_event_sec = temp_t.tv_sec + TimeStampDiffInt;
-				event.input_event_usec = TimeStampDiffFloat;
-				if (GoodixTSEnTimestampDebug == true) {
-					tptstamp_info("[Move] DIFF : %d IC time : %d %ld\n", TimeStampDiff, event.input_event_sec, event.input_event_usec);
-				}
-			}
-		}
-#else // Version >= FW(06.00.00.05) + CFG(7)
-		// EV_KEY = 1 / BTN_TOUCH = 330 / 1 Down : 0 UP
-		if (GoodixTSEnTimestamp == true && !strcmp(evdev->handle.name, "event8")) {
-			if((v->type == EV_KEY) && (v->code == BTN_TOUCH)) {
-				if(v->value == 1) { //Down
-					prev_t.tv_sec= ts.tv_sec;
-					prev_t.tv_nsec= ts.tv_nsec;
-					touch_press = true;
-					if (GoodixTSEnTimestampDebug == true) {
-						tptstamp_info("[Start] System time : %d %ld\n", prev_t.tv_sec, prev_t.tv_nsec);
-					}
-				} else { // UP
-					TimeStampDiff = GoodixTSTimeStamp;
-					if(TimeStampDiff != GoodixPreTSTimeStamp){
-						temp_t.tv_nsec = TimeStampDiff * NSEC_PER_USEC + prev_t.tv_nsec;
-						TimeStampDiffInt = temp_t.tv_nsec / 1000000000;
-						TimeStampDiffFloat = temp_t.tv_nsec - ( TimeStampDiffInt * 1000000000);
-						if (GoodixTSEnTimestampDebug == true) {
-							tptstamp_info("[End] System time : %d %ld\n", event.input_event_sec, event.input_event_usec);
-						}
-						event.input_event_sec = prev_t.tv_sec + TimeStampDiffInt;
-						event.input_event_usec = (TimeStampDiffFloat / NSEC_PER_USEC);
-					}
-					//prev_t.tv_sec= event.input_event_sec;
-					//prev_t.tv_nsec= TimeStampDiffFloat;
-					if (GoodixTSEnTimestampDebug == true) {
-						tptstamp_info("[End] DIFF: %d IC time : %d %ld\n", TimeStampDiff, event.input_event_sec, event.input_event_usec);
-					}
-					touch_press = false;
-				}
-			}
-			if (((v->type == EV_ABS) || (v->type == EV_SYN)) && (touch_press == true)) {
-				TimeStampDiff = GoodixTSTimeStamp;
-				if(TimeStampDiff != GoodixPreTSTimeStamp) {
-					GoodixPreTSTimeStamp = GoodixTSTimeStamp;
-					temp_t.tv_nsec = TimeStampDiff * NSEC_PER_USEC + prev_t.tv_nsec;
-					TimeStampDiffInt = temp_t.tv_nsec / 1000000000;
-					TimeStampDiffFloat = temp_t.tv_nsec - ( TimeStampDiffInt * 1000000000);
-					if (GoodixTSEnTimestampDebug == true) {
-						tptstamp_info("[Move] System time : %d %ld\n", event.input_event_sec, event.input_event_usec);
-					}
-					event.input_event_sec = prev_t.tv_sec + TimeStampDiffInt;
-					event.input_event_usec = (TimeStampDiffFloat / NSEC_PER_USEC);
-					prev_t.tv_sec= event.input_event_sec;
-					prev_t.tv_nsec= TimeStampDiffFloat;
-					if (GoodixTSEnTimestampDebug == true) {
-						//tptstamp_info("[Move] DIFF 1: %d IC time : %d %ld\n", TimeStampDiff, event.input_event_sec, event.input_event_usec);
-						tptstamp_info("[Move] DIFF : %d IC time : %d %ld\n", TimeStampDiff, prev_t.tv_sec, prev_t.tv_nsec);
-					}
-				} else {
-					if (GoodixTSEnTimestampDebug == true) {
-						tptstamp_info("[Skip] %d\n", TimeStampDiff);
-					}
-				}
-			}
-		}
-#endif
-#endif
-// ASUS_BSP --- Touch
 
 		event.type = v->type;
 		event.code = v->code;
@@ -432,12 +296,7 @@ static void evdev_events(struct input_handle *handle,
 {
 	struct evdev *evdev = handle->private;
 	struct evdev_client *client;
-	ktime_t ev_time[EV_CLK_MAX];
-
-	ev_time[EV_CLK_MONO] = ktime_get();
-	ev_time[EV_CLK_REAL] = ktime_mono_to_real(ev_time[EV_CLK_MONO]);
-	ev_time[EV_CLK_BOOT] = ktime_mono_to_any(ev_time[EV_CLK_MONO],
-						 TK_OFFS_BOOT);
+	ktime_t *ev_time = input_get_timestamp(handle->dev);
 
 	rcu_read_lock();
 

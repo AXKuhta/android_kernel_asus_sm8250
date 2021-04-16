@@ -160,7 +160,7 @@ static void override_i2c_write_setting(struct camera_io_master *io_master_info, 
 	struct cam_actuator_ctrl_t *a_ctrl = container_of(io_master_info,struct cam_actuator_ctrl_t,io_master_info);
 	for(i=0;i<setting->size;i++)
 	{
-		CAM_DBG(CAM_ACTUATOR,"OP %s, [%d/%d], addr[0x%x] = 0x%x",
+		CAM_INFO(CAM_ACTUATOR,"OP %s, [%d/%d], addr[0x%x] = 0x%x",
 					op_string,
 					i+1,setting->size,
 					setting->reg_setting[i].reg_addr,

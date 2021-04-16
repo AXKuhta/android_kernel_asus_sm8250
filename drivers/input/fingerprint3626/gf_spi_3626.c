@@ -42,10 +42,10 @@
 #include <linux/regulator/consumer.h>
 #include <linux/of_gpio.h>
 #include <linux/timer.h>
-#include <linux/msm_drm_notify.h>
 #include <drm/drm_panel.h>
 #include <linux/pm_qos.h>
 #include <linux/cpufreq.h>
+#include <linux/pm_wakeup.h>
 #include "gf_spi.h"
 
 #if defined(USE_SPI_BUS)
@@ -76,7 +76,6 @@ static int SPIDEV_MAJOR;
 static DECLARE_BITMAP(minors, N_SPI_MINORS);
 static LIST_HEAD(device_list);
 static DEFINE_MUTEX(device_list_lock);
-static struct wakeup_source fp_wakelock;
 static struct gf_dev gf;
 
 static struct gf_key_map maps[] = {
@@ -509,9 +508,9 @@ static irqreturn_t gf_irq(int irq, void *handle)
 {
 #if defined(GF_NETLINK_ENABLE)
 	char msg = GF_NET_EVENT_IRQ;
-
+    struct gf_dev *gf_dev = &gf;
 	//wake_lock_timeout(&fp_wakelock, msecs_to_jiffies(WAKELOCK_HOLD_TIME));
-	__pm_wakeup_event(&fp_wakelock, WAKELOCK_HOLD_TIME);
+	__pm_wakeup_event(gf_dev->ws, WAKELOCK_HOLD_TIME);
 	sendnlmsg(&msg);
 #elif defined(GF_FASYNC)
 	struct gf_dev *gf_dev = &gf;
@@ -585,12 +584,12 @@ static int gf_release(struct inode *inode, struct file *filp)
 	mutex_lock(&device_list_lock);
 	gf_dev = filp->private_data;
 	filp->private_data = NULL;
-
     pr_err("gf_release , drm_panel_notifier_unregister");
     if (gf_dev->active_panel_asus  !=  NULL) {
         if (drm_panel_notifier_unregister(gf_dev->active_panel_asus, &gf_dev->notifier) < 0)
 		     pr_err("Failed to drm_panel_notifier_unregister");
 	}
+
 	/*last close?? */
 	gf_dev->users--;
 	if (!gf_dev->users) {
@@ -684,7 +683,7 @@ static int gf_probe(struct platform_device *pdev)
 	int status = -EINVAL;
 	unsigned long minor;
 	int i;
-
+    struct device *dev;
 	/* Initialize the driver data */
 	INIT_LIST_HEAD(&gf_dev->device_entry);
 #if defined(USE_SPI_BUS)
@@ -707,8 +706,6 @@ static int gf_probe(struct platform_device *pdev)
 	mutex_lock(&device_list_lock);
 	minor = find_first_zero_bit(minors, N_SPI_MINORS);
 	if (minor < N_SPI_MINORS) {
-		struct device *dev;
-
 		gf_dev->devt = MKDEV(SPIDEV_MAJOR, minor);
 		dev = device_create(gf_class, &gf_dev->spi->dev, gf_dev->devt,
 				gf_dev, GF_DEV_NAME);
@@ -763,7 +760,7 @@ static int gf_probe(struct platform_device *pdev)
 
 	gf_dev->irq = gf_irq_num(gf_dev);
 
-	wakeup_source_init(&fp_wakelock, "fp_wakelock");
+	gf_dev->ws = wakeup_source_register(dev, "fp_wakelock");
 	status = request_threaded_irq(gf_dev->irq, NULL, gf_irq,
 			IRQF_TRIGGER_RISING | IRQF_ONESHOT,
 			"gf", gf_dev);
@@ -815,7 +812,7 @@ static int gf_remove(struct platform_device *pdev)
 {
 	struct gf_dev *gf_dev = &gf;
 
-	wakeup_source_trash(&fp_wakelock);
+	wakeup_source_unregister(gf_dev->ws);
 	/* make sure ops on existing fds can abort cleanly */
 	if (gf_dev->irq)
 		free_irq(gf_dev->irq, gf_dev);

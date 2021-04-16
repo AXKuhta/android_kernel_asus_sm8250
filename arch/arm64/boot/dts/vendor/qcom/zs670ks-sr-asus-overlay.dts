@@ -95,6 +95,11 @@
 };
 //ZS670KS_HALL_sensor_Timo_Xu --------
 
+&usb2_phy0 {
+	qcom,param-override-seq = < 0x63 0x6c
+	                            0x8c 0x70>;
+};
+
  /*    ====================================
  *    overlay for kona.dtsi - end
  *    ====================================
@@ -167,15 +172,15 @@
 
 };
 /* ASUS_BSP +++ icm20690 */
+//remove tmp for ERROR: ufdt_overlay_do_fixups():Couldn't find 'pm8008_l3' symbol in main dtb
 &qupv3_se5_spi {
         icm206xx_spi@0 {
-                icm206xx-supply = <&pm8008_l3>;
+                icm206xx-supply = <&L3P>;
                 icm206xx-vdd-supply = <&pm8150a_l5>;
                 invn,gpio-int = <&tlmm 100 1>;
         };
 };
-/* ASUS_BSP --- icm20690 */
-
+/* ASUS_BSP --- icm20690 */	
 
 &L11C {
 	regulator-min-microvolt = <3000000>;
@@ -377,12 +382,26 @@
  *    ====================================
  */
  
+&cam_cci0 {
+	//########### cam_read_eeprom ###########
+	asus_cam_readeeprom: asus,cam-readeeprom {
+		compatible = "camera,read_eeprom";
+		cell-index = <1>;
+		cci-master = <0>;
+		cam_read_eeprom-supply = <&pm8150a_l5>;    //MCAM0_DOVDD_T_1P8
+		regulator-names = "cam_read_eeprom";
+		pinctrl-names = "default";
+		pinctrl-states = "default";
+		pinctrl-0 = <&zf7id_pin_default>; 
+		status = "ok";
+	};
+};
  //Asus bsp Porting ID gpio pull status as EE request, use driver readeeprom as client +++
- &asus_cam_readeeprom{
+ /*&asus_cam_readeeprom{
  		pinctrl-names = "default";
 		pinctrl-states = "default";
 		pinctrl-0 = <&zf7id_pin_default>; 
- };
+ };*/
  //Asus bsp Porting ID gpio pull status as EE request, use driver readeeprom as client ---
 
 /*    ====================================

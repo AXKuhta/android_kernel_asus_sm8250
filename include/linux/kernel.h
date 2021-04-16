@@ -147,9 +147,6 @@ extern enum DEVICE_NFCID g_ASUS_nfcID;
 #endif //ZS670KS
 //ASUS_SZ_BSP 2019/11/19 Cassie : Add for zs670ks id ---
 
-// ASUS_BSP +++ get permissive status
-extern int permissive_enable;
-// ASUS_BSP --- get permissive status
 
 #define USHRT_MAX	((u16)(~0U))
 #define SHRT_MAX	((s16)(USHRT_MAX>>1))

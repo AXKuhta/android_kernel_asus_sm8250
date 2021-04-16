@@ -652,6 +652,17 @@ config HID_MULTITOUCH
 	  To compile this driver as a module, choose M here: the
 	  module will be called hid-multitouch.
 
+config HID_NINTENDO
+	tristate "Nintendo Joy-Con and Pro Controller support"
+	depends on HID
+	help
+	Adds support for the Nintendo Switch Joy-Cons and Pro Controller.
+	All controllers support bluetooth, and the Pro Controller also supports
+	its USB mode.
+
+	To compile this driver as a module, choose M here: the
+	module will be called hid-nintendo.
+
 config HID_NTI
 	tristate "NTI keyboard adapters"
 	---help---
@@ -1087,12 +1098,6 @@ config HID_QVR
 	retrieve the calibration data of the associated device.
 	Say 'Y' or 'M' if you want to connect an external device to
 	stream sensor data for QVR support.
-
-config USB_EC_DRIVER
-	tristate "USB_EC_DRIVER gDongleType support"
-	depends on HID
-	---help---
-	Say 'Y' if EC driver and gDongleType ready
 
 endmenu
 

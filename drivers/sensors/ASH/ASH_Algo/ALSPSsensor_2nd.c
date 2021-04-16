@@ -59,7 +59,7 @@ static struct workqueue_struct 		*ALSPS_workqueue;
 static struct workqueue_struct 		*ALSPS_delay_workqueue;
 static struct mutex 				g_alsps_lock;
 static struct mutex 				g_i2c_lock;
-static struct wake_lock 			g_alsps_wake_lock;
+static struct wakeup_source 			*g_alsps_wake_lock;
 static struct hrtimer 			g_alsps_timer;
 static struct i2c_client *g_i2c_client;
 static int g_als_last_lux = 0;
@@ -1839,7 +1839,7 @@ mutex_lock(&g_alsps_lock);
 	}
 	dbg("2nd ALSPS ist --- \n");
 ist_err:	
-	wake_unlock(&g_alsps_wake_lock);
+	__pm_relax(g_alsps_wake_lock);
 	dbg("[IRQ] 2nd Enable irq !! \n");
 	enable_irq(ALSPS_SENSOR_IRQ);	
 mutex_unlock(&g_alsps_lock);
@@ -1858,7 +1858,7 @@ static void ALSPS_irq_handler(void)
 
 	/*Queue work will enbale IRQ and unlock wake_lock*/
 	queue_work(ALSPS_workqueue, &ALSPS_ist_work);
-	wake_lock(&g_alsps_wake_lock);
+	__pm_stay_awake(g_alsps_wake_lock);
 	return;
 irq_err:
 	dbg("[IRQ] 2nd Enable irq !! \n");
@@ -1893,7 +1893,7 @@ bool proximitySecStatus(void)
 	int ret=0;
 	int threshold_high = 0;
 
-wake_lock(&g_alsps_wake_lock);	
+	__pm_stay_awake(g_alsps_wake_lock);
 	/* check probe status */
 	if(ALSPS_hw_client == NULL)
 		goto ERROR_HANDLE;
@@ -1946,7 +1946,7 @@ wake_lock(&g_alsps_wake_lock);
 ERROR_HANDLE:
 	
 	mutex_unlock(&g_alsps_lock);
-wake_unlock(&g_alsps_wake_lock);
+	__pm_relax(g_alsps_wake_lock);
 	return status;
 }
 EXPORT_SYMBOL(proximitySecStatus);
@@ -2480,7 +2480,7 @@ static int __init ALSPS_init_2nd(void)
 	mutex_init(&g_i2c_lock);
 
 	/* Initialize the wake lock */
-	wake_lock_init(&g_alsps_wake_lock, WAKE_LOCK_SUSPEND, "ALSPS_wake_lock");
+	g_alsps_wake_lock = wakeup_source_register(NULL, "ALSPS_wake_lock");
 
 	/*Initialize high resolution timer*/
 	hrtimer_init(&g_alsps_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -2568,7 +2568,7 @@ static void __exit ALSPS_exit_2nd(void)
 	psensor_ATTR_unregister_2nd();
 	lsensor_ATTR_unregister_2nd();
 	
-	wake_lock_destroy(&g_alsps_wake_lock);
+	wakeup_source_unregister(g_alsps_wake_lock);
 	mutex_destroy(&g_alsps_lock);
 	mutex_destroy(&g_i2c_lock);
 	kfree(g_ps_data);

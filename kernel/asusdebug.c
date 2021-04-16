@@ -1497,6 +1497,9 @@ static ssize_t asusdebug_write(struct file *file, const char __user *buf, size_t
 		printk("Kernel dbg mode = %d\n", g_user_dbg_mode);
 	} else if (strncmp(messages, "get_asdf_log",
 			   strlen("get_asdf_log")) == 0) {
+#ifdef CONFIG_QCOM_RTB
+		extern int g_saving_rtb_log;
+#endif
 		ulong *printk_buffer_slot2_addr;
 
 		printk_buffer_slot2_addr = (ulong *)PRINTK_BUFFER_SLOT2;
@@ -1512,15 +1515,15 @@ static ssize_t asusdebug_write(struct file *file, const char __user *buf, size_t
 				save_rtb_log();
 #endif
 			if ((*printk_buffer_slot2_addr) == (ulong)PRINTK_BUFFER_MAGIC) {
-				printk("[ASDF] Do hard reset after save asdf log.\n");
+				printk("[ASDF] ksys_sync after saving asdf log\n");
 				initKernelEnv();
 				printk("[ASDF] asusdebug: initKernelEnv\n");
 				ksys_sync();
 				printk("[ASDF] asusdebug: ksys_sync\n");
 				deinitKernelEnv();
 				printk("[ASDF] asusdebug: deinitKernelEnv\n");
-				qpnp_pon_system_pwr_off(PON_POWER_OFF_HARD_RESET);
-				kernel_restart("save lastshutdown");
+				//qpnp_pon_system_pwr_off(PON_POWER_OFF_HARD_RESET);
+				//kernel_restart("save lastshutdown");
 			}
 
 			(*printk_buffer_slot2_addr) = (ulong)PRINTK_BUFFER_MAGIC;

@@ -31,11 +31,6 @@
 #include <linux/of_irq.h>
 #include <linux/spinlock.h>
 #include <dt-bindings/input/gpio-keys.h>
-#include <linux/input/qpnp-power-on.h>
-#include <linux/uaccess.h>
-bool volume_key_wake_en = 0; /* /sys/module/gpio_keys/parameters/volume_key_wake_en, default is N */
-module_param(volume_key_wake_en, bool, 0644);
-MODULE_PARM_DESC(volume_key_wake_en, "Enable/Disable volume key wakeup");
 
 struct gpio_button_data {
 	const struct gpio_keys_button *button;
@@ -804,30 +799,6 @@ static const struct of_device_id gpio_keys_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, gpio_keys_of_match);
 
-#ifdef ASUS_FTM_BUILD//add by stone1_wang for factory build +++
-static ssize_t printklog_write (struct file *filp, const char *userbuf, size_t size, loff_t *loff_p)
-{
-	char str[128];
-	memset(str, 0, sizeof(str));
-
-	if(size > 127)
-		size = 127;
-
-	if (copy_from_user(str, userbuf, size))
-	{
-		pr_err("copy from bus failed!\n");
-		return -EFAULT;
-	}
-
-	printk(KERN_ERR"[factool log]:%s",str);
-	return size;
-}
-
-static struct file_operations printklog_fops = {
-	.write = printklog_write,
-};
-#endif
-
 static int gpio_keys_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -933,14 +904,6 @@ static int gpio_keys_probe(struct platform_device *pdev)
 
 	device_init_wakeup(dev, wakeup);
 
-#ifdef ZS670KS
-#ifdef ASUS_FTM_BUILD//add by stone1_wang for factory build +++
-	if(proc_create("fac_printklog", 0777, NULL, &printklog_fops)==NULL)
-	{
-		printk(KERN_ERR"create printklog node is error\n");
-	}
-#endif
-#endif
 	return 0;
 }
 
@@ -1005,19 +968,10 @@ gpio_keys_enable_wakeup(struct gpio_keys_drvdata *ddata)
 
 	for (i = 0; i < ddata->pdata->nbuttons; i++) {
 		bdata = &ddata->data[i];
-		if (bdata->button->code == 115) {
-			if (volume_key_wake_en) {
-				error = gpio_keys_button_enable_wakeup(bdata);
-				if (error)
-					goto err_out;
-				asus_enable_resin_irq_wake(1);
-			}
-		} else {
-			if (bdata->button->wakeup) {
-				error = gpio_keys_button_enable_wakeup(bdata);
-				if (error)
-					goto err_out;
-			}
+		if (bdata->button->wakeup) {
+			error = gpio_keys_button_enable_wakeup(bdata);
+			if (error)
+				goto err_out;
 		}
 		bdata->suspended = true;
 	}
@@ -1044,12 +998,8 @@ gpio_keys_disable_wakeup(struct gpio_keys_drvdata *ddata)
 	for (i = 0; i < ddata->pdata->nbuttons; i++) {
 		bdata = &ddata->data[i];
 		bdata->suspended = false;
-		if (irqd_is_wakeup_set(irq_get_irq_data(bdata->irq))) {
+		if (irqd_is_wakeup_set(irq_get_irq_data(bdata->irq)))
 			gpio_keys_button_disable_wakeup(bdata);
-
-			if(volume_key_wake_en && bdata->button->code == 115)
-				asus_enable_resin_irq_wake(0);
-		}
 	}
 }
 

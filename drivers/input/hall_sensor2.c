@@ -64,7 +64,7 @@ static struct hall_sensor_str {
 	int status;
 	int enable;
 	spinlock_t mHallSensorLock;
-	struct wakeup_source wake_src;
+	struct wakeup_source *wake_src;
 	struct delayed_work hall_sensor_work;
     struct i2c_client *client;
 	struct input_dev *hall_indev;
@@ -169,13 +169,13 @@ static irqreturn_t hall_sensor_reenable_irq(int irq, void *dev_id)
 
 	if(is_suspend == 1){
 		log("%s,is_suspend=1\n",__func__);
-		__pm_wakeup_event(&hall_sensor_dev->wake_src, REPORT_WAKE_LOCK_TIMEOUT+(4 * HZ));
+		__pm_wakeup_event(hall_sensor_dev->wake_src, REPORT_WAKE_LOCK_TIMEOUT+(4 * HZ));
 		queue_delayed_work(hall_sensor_wq, &hall_sensor_dev->hall_sensor_work, msecs_to_jiffies(DELAYED_WORK_TIME*2));
         return IRQ_HANDLED;
     }
 
 	dbg("[ISR] %s hall_sensor_interrupt = %d\n",__func__,ASUS_HALL_SENSOR_IRQ);
-	__pm_wakeup_event(&hall_sensor_dev->wake_src, REPORT_WAKE_LOCK_TIMEOUT+(1 * HZ));
+	__pm_wakeup_event(hall_sensor_dev->wake_src, REPORT_WAKE_LOCK_TIMEOUT+(1 * HZ));
 	mutex_lock(&hall_sensor_dev->hall2_mutex);
 	err = i2c_read_bytes(report_client, 0x17, data);
 	mutex_unlock(&hall_sensor_dev->hall2_mutex);
@@ -213,7 +213,7 @@ static void debounce_hall_sensor_report_function(struct work_struct *dat)
 	int SWX2=-1;
 	int SWY1=-1;
 
-	__pm_wakeup_event(&hall_sensor_dev->wake_src, REPORT_WAKE_LOCK_TIMEOUT);
+	__pm_wakeup_event(hall_sensor_dev->wake_src, REPORT_WAKE_LOCK_TIMEOUT);
 	mutex_lock(&hall_sensor_dev->hall2_mutex);
 	err = i2c_read_bytes(report_client, 0x17, data);
 	if (err != 1)
@@ -234,25 +234,28 @@ static void debounce_hall_sensor_report_function(struct work_struct *dat)
 	else
 		Y_value = data[4]*256 + data[5];
 
-	if(X_value > g_threshold2X)
-		log("new latch g_threshold2X=%d\n",g_threshold2X);
-	else if(X_value < g_threshold1X)
-			log("old latch g_threshold1X=%d\n",g_threshold1X);
-
 	log("interrupt  X_value=%d SWX1=%d SWX2=%d Y_value=%d SWY1=%d\n",X_value,SWX1,SWX2,Y_value,SWY1);
 
 	if( ((SWX1==0) && (SWY1==0)) || ((SWX2==1) && (SWY1==0)))
 	{
-			envp[0] = "STATUS=CLOSE";
-			envp[1] = NULL;
-			kobject_uevent_env(&report_client->dev.kobj, KOBJ_CHANGE, envp);
-			g_state=2;
+		envp[0] = "STATUS=CLOSE";
+		envp[1] = NULL;
+		kobject_uevent_env(&report_client->dev.kobj, KOBJ_CHANGE, envp);
+		g_state=2;
+		if((SWX1==0) && (SWY1==0))
+			log("old latch g_threshold1X=%d\n",g_threshold1X);
+		else
+			log("new latch g_threshold2X=%d\n",g_threshold2X);
 	}else if( ((SWX1==0) && (SWY1==1)) || ((SWX2==0) && (SWY1==0)))
 	{
 		envp[0] = "STATUS=OPEN";
 		envp[1] = NULL;
 		kobject_uevent_env(&report_client->dev.kobj, KOBJ_CHANGE, envp);
 		g_state=1;
+		if((SWX1==0) && (SWY1==1))
+			log("old latch g_threshold1X=%d\n",g_threshold1X);
+		else
+			log("new latch g_threshold2X=%d\n",g_threshold2X);
 	}else if((SWX1==1) || (SWY1==1))
 	{
 		envp[0] = "STATUS=NONE";
@@ -863,7 +866,9 @@ static int init_data(void)
 		ret = -ENOMEM;
 		goto init_data_err;
 	}
-	wakeup_source_init(&hall_sensor_dev->wake_src, "HallSensor2_wake_lock");
+	hall_sensor_dev->wake_src=wakeup_source_create("HallSensor2_wake_lock");
+	wakeup_source_add(hall_sensor_dev->wake_src);
+	//wakeup_source_init(&hall_sensor_dev->wake_src, "HallSensor2_wake_lock");
 	return 0;
 init_data_err:
 	err("Init Data ERROR\n");
@@ -1058,7 +1063,9 @@ static void __exit hall_sensor2_exit(void)
     }
     mutex_destroy(&hall_sensor_dev->hall2_mutex);
 	free_irq(ASUS_HALL_SENSOR_IRQ, hall_sensor_dev);
-	wakeup_source_trash(&hall_sensor_dev->wake_src);
+	wakeup_source_remove(hall_sensor_dev->wake_src);
+	wakeup_source_destroy(hall_sensor_dev->wake_src);
+	//wakeup_source_trash(&hall_sensor_dev->wake_src);
 	unregister_chrdev(major,DRIVER_NAME);
 	i2c_del_driver(&hall_sensor2_driver);
 	hall_sensor_dev=NULL;

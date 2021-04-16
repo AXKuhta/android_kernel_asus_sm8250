@@ -114,6 +114,7 @@ struct dsi_backlight_config {
 	u32 bl_level;
 	u32 bl_scale;
 	u32 bl_scale_sv;
+	bool bl_inverted_dbv;
 
 	int en_gpio;
 	/* PWM params */
@@ -201,6 +202,7 @@ struct dsi_panel {
 	bool ulps_feature_enabled;
 	bool ulps_suspend_enabled;
 	bool allow_phy_power_off;
+	bool reset_gpio_always_on;
 	atomic_t esd_recovery_pending;
 
 	bool panel_initialized;
@@ -342,6 +344,5 @@ void dsi_panel_calc_dsi_transfer_time(struct dsi_host_common_cfg *config,
 int dsi_panel_asus_switch_fps(struct dsi_panel *panel);
 
 int dsi_panel_set_dimming_speed(struct dsi_panel *panel,int val);
-
 
 #endif /* _DSI_PANEL_H_ */

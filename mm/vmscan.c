@@ -61,9 +61,7 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/vmscan.h>
-// ASUS_BSP +++ get permissive status
-#include <linux/kernel.h>
-// ASUS_BSP --- get permissive status
+
 
 struct scan_control {
 	/* How many pages shrink_list() should reclaim */
@@ -89,6 +87,9 @@ struct scan_control {
 
 	/* Can pages be swapped as part of reclaim? */
 	unsigned int may_swap:1;
+
+	/* e.g. boosted watermark reclaim leaves slabs alone */
+	unsigned int may_shrinkslab:1;
 
 	/*
 	 * Cgroups are not reclaimed below their configured memory.low,
@@ -137,6 +138,13 @@ struct scan_control {
 	 */
 	struct vm_area_struct *target_vma;
 };
+
+/*
+ * Number of active kswapd threads
+ */
+#define DEF_KSWAPD_THREADS_PER_NODE 1
+int kswapd_threads = DEF_KSWAPD_THREADS_PER_NODE;
+int kswapd_threads_current = DEF_KSWAPD_THREADS_PER_NODE;
 
 #ifdef ARCH_HAS_PREFETCH
 #define prefetch_prev_lru_page(_page, _base, _field)			\
@@ -1471,14 +1479,8 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			count_memcg_page_event(page, PGLAZYFREED);
 		} else if (!mapping || !__remove_mapping(mapping, page, true))
 			goto keep_locked;
-		/*
-		 * At this point, we have no other references and there is
-		 * no way to pick any more up (removed from LRU, removed
-		 * from pagecache). Can use non-atomic bitops now (and
-		 * we obviously don't have to worry about waking up a process
-		 * waiting on the page lock, because there are no references.
-		 */
-		__ClearPageLocked(page);
+
+		unlock_page(page);
 free_it:
 		nr_reclaimed++;
 
@@ -2519,10 +2521,13 @@ out:
 			/*
 			 * Scan types proportional to swappiness and
 			 * their relative recent reclaim efficiency.
-			 * Make sure we don't miss the last page
-			 * because of a round-off error.
+			 * Make sure we don't miss the last page on
+			 * the offlined memory cgroups because of a
+			 * round-off error.
 			 */
-			scan = DIV64_U64_ROUND_UP(scan * fraction[file],
+			scan = mem_cgroup_online(memcg) ?
+			       div64_u64(scan * fraction[file], denominator) :
+			       DIV64_U64_ROUND_UP(scan * fraction[file],
 						  denominator);
 			break;
 		case SCAN_FILE:
@@ -3293,6 +3298,7 @@ unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
 		.may_writepage = !laptop_mode,
 		.may_unmap = 1,
 		.may_swap = 1,
+		.may_shrinkslab = 1,
 	};
 
 	/*
@@ -3337,6 +3343,7 @@ unsigned long mem_cgroup_shrink_node(struct mem_cgroup *memcg,
 		.may_unmap = 1,
 		.reclaim_idx = MAX_NR_ZONES - 1,
 		.may_swap = !noswap,
+		.may_shrinkslab = 1,
 	};
 	unsigned long lru_pages;
 
@@ -3383,6 +3390,7 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 		.may_writepage = !laptop_mode,
 		.may_unmap = 1,
 		.may_swap = may_swap,
+		.may_shrinkslab = 1,
 	};
 
 	/*
@@ -4084,20 +4092,82 @@ unsigned long shrink_all_memory(unsigned long nr_to_reclaim)
    restore their cpu bindings. */
 static int kswapd_cpu_online(unsigned int cpu)
 {
-	int nid;
+	int nid, hid;
+	int nr_threads = kswapd_threads_current;
 
 	for_each_node_state(nid, N_MEMORY) {
 		pg_data_t *pgdat = NODE_DATA(nid);
 		const struct cpumask *mask;
 
 		mask = cpumask_of_node(pgdat->node_id);
-
-		if (cpumask_any_and(cpu_online_mask, mask) < nr_cpu_ids)
-			/* One of our CPUs online: restore mask */
-			set_cpus_allowed_ptr(pgdat->kswapd, mask);
+		if (cpumask_any_and(cpu_online_mask, mask) < nr_cpu_ids) {
+			for (hid = 0; hid < nr_threads; hid++) {
+				/* One of our CPUs online: restore mask */
+				set_cpus_allowed_ptr(pgdat->kswapd[hid], mask);
+			}
+		}
 	}
 	return 0;
 }
+
+static void update_kswapd_threads_node(int nid)
+{
+	pg_data_t *pgdat;
+	int drop, increase;
+	int last_idx, start_idx, hid;
+	int nr_threads = kswapd_threads_current;
+
+	pgdat = NODE_DATA(nid);
+	last_idx = nr_threads - 1;
+	if (kswapd_threads < nr_threads) {
+		drop = nr_threads - kswapd_threads;
+		for (hid = last_idx; hid > (last_idx - drop); hid--) {
+			if (pgdat->kswapd[hid]) {
+				kthread_stop(pgdat->kswapd[hid]);
+				pgdat->kswapd[hid] = NULL;
+			}
+		}
+	} else {
+		increase = kswapd_threads - nr_threads;
+		start_idx = last_idx + 1;
+		for (hid = start_idx; hid < (start_idx + increase); hid++) {
+			pgdat->kswapd[hid] = kthread_run(kswapd, pgdat,
+						"kswapd%d:%d", nid, hid);
+			if (IS_ERR(pgdat->kswapd[hid])) {
+				pr_err("Failed to start kswapd%d on node %d\n",
+					hid, nid);
+				pgdat->kswapd[hid] = NULL;
+				/*
+				 * We are out of resources. Do not start any
+				 * more threads.
+				 */
+				break;
+			}
+		}
+	}
+}
+
+void update_kswapd_threads(void)
+{
+	int nid;
+
+	if (kswapd_threads_current == kswapd_threads)
+		return;
+
+	/*
+	 * Hold the memory hotplug lock to avoid racing with memory
+	 * hotplug initiated updates
+	 */
+	mem_hotplug_begin();
+	for_each_node_state(nid, N_MEMORY)
+		update_kswapd_threads_node(nid);
+
+	pr_info("kswapd_thread count changed, old:%d new:%d\n",
+		kswapd_threads_current, kswapd_threads);
+	kswapd_threads_current = kswapd_threads;
+	mem_hotplug_done();
+}
+
 
 /*
  * This kswapd start function will be called by init and node-hot-add.
@@ -4107,18 +4177,25 @@ int kswapd_run(int nid)
 {
 	pg_data_t *pgdat = NODE_DATA(nid);
 	int ret = 0;
+	int hid, nr_threads;
 
-	if (pgdat->kswapd)
+	if (pgdat->kswapd[0])
 		return 0;
 
-	pgdat->kswapd = kthread_run(kswapd, pgdat, "kswapd%d", nid);
-	if (IS_ERR(pgdat->kswapd)) {
-		/* failure at boot is fatal */
-		BUG_ON(system_state < SYSTEM_RUNNING);
-		pr_err("Failed to start kswapd on node %d\n", nid);
-		ret = PTR_ERR(pgdat->kswapd);
-		pgdat->kswapd = NULL;
+	nr_threads = kswapd_threads;
+	for (hid = 0; hid < nr_threads; hid++) {
+		pgdat->kswapd[hid] = kthread_run(kswapd, pgdat, "kswapd%d:%d",
+							nid, hid);
+		if (IS_ERR(pgdat->kswapd[hid])) {
+			/* failure at boot is fatal */
+			BUG_ON(system_state < SYSTEM_RUNNING);
+			pr_err("Failed to start kswapd%d on node %d\n",
+				hid, nid);
+			ret = PTR_ERR(pgdat->kswapd[hid]);
+			pgdat->kswapd[hid] = NULL;
+		}
 	}
+	kswapd_threads_current = nr_threads;
 	return ret;
 }
 
@@ -4128,168 +4205,19 @@ int kswapd_run(int nid)
  */
 void kswapd_stop(int nid)
 {
-	struct task_struct *kswapd = NODE_DATA(nid)->kswapd;
+	struct task_struct *kswapd;
+	int hid;
+	int nr_threads = kswapd_threads_current;
 
-	if (kswapd) {
-		kthread_stop(kswapd);
-		NODE_DATA(nid)->kswapd = NULL;
-	}
-}
-
-static DECLARE_WAIT_QUEUE_HEAD(RoutineWaitQueue);
-static DECLARE_WAIT_QUEUE_HEAD(RoutineTimeoutWaitQueue);
-
-#define DSelinuxEnforceFile "/sys/fs/selinux/enforce"
-bool g_bSetEnforceChanged;
-static bool g_bSetEnforceTimeout;
-static bool g_bSetEnforce;
-static void asussetenforce(void)
-{
-	struct file *pFile = NULL;
-	char buf[8] = "";
-	mm_segment_t old_fs;
-
-	if (pFile == NULL)
-		pFile = filp_open(DSelinuxEnforceFile, O_RDWR, 0);
-
-	if (IS_ERR(pFile)) {
-		printk("[SELinux] Failed to open enforce file\n");
-	} else {
-		printk("[SELinux] Succeed in opening enforce file\n");
-		old_fs = get_fs();
-		set_fs(get_ds());
-		snprintf(buf, sizeof buf, "%d", g_bSetEnforce);
-		pFile->f_op->write(pFile, (char *)buf, sizeof(buf), &pFile->f_pos);
-		set_fs(old_fs);
-
-		filp_close(pFile, NULL);
-	}
-}
-
-#include <linux/proc_fs.h>
-#define DRDCmdMaxLength 100
-#define DAsusSetEnforce "asussetenforce"
-#define DAsusSetEnforceLength strlen(DAsusSetEnforce)
-char g_szRD[DRDCmdMaxLength] = "";
-int g_count = 0;
-
-int wake_setselinux_wq(int nValue){
-
-// ASUS_BSP +++ get permissive status
-	if(permissive_enable == 1 && nValue == 0)
-	{
-		printk("[SELinux] CmdLine : androidboot.selinux=permissive !!(%d)\n", nValue);
-		return 0;
-	}
-// ASUS_BSP --- get permissive status
-
-	sprintf(g_szRD, "%s", DAsusSetEnforce);
-	g_bSetEnforce = nValue;
-	g_bSetEnforceChanged = 1;
-	wake_up_interruptible(&RoutineWaitQueue);
-	g_count++;
-	return 1;
-}
-
-static ssize_t proc_rd_read(struct file *filp, char __user *buff, size_t len, loff_t *off)
-{
-	static unsigned int nFlag;
-	unsigned int ret = 0, iret = 0;
-	nFlag = !nFlag;
-	if (!nFlag)
-		return 0;
-
-	ret = strlen(g_szRD);
-	iret = copy_to_user(buff, g_szRD, ret);
-	return ret;
-}
-
-static ssize_t proc_rd_write(struct file *filp, const char __user *buff, size_t len, loff_t *off)
-{
-	char *pPos;
-
-	if (len > DRDCmdMaxLength - 1)
-		len = DRDCmdMaxLength - 1;
-
-	if (copy_from_user(g_szRD, buff, len))
-	{
-		return -EFAULT;
-	}
-
-	g_szRD[len] = '\0';
-	pPos = strchr (g_szRD, ':');
-
-	if (pPos) {
-		if (!strncmp(g_szRD, DAsusSetEnforce, pPos - g_szRD)) {
-			if (*pPos == ':') {
-				if (*(pPos+2) == '\n' || *(pPos+2) == '\0') {
-					int nValue = *(pPos+1) - '0';
-					if (nValue == 0 || nValue == 1) {
-						printk("[SELinux] Setting enforce to %d\n", nValue);
-						wake_setselinux_wq(nValue);
-					}
-				}
-
-			}
+	for (hid = 0; hid < nr_threads; hid++) {
+		kswapd = NODE_DATA(nid)->kswapd[hid];
+		if (kswapd) {
+			kthread_stop(kswapd);
+			NODE_DATA(nid)->kswapd[hid] = NULL;
 		}
 	}
-	return len;
 }
 
-static struct file_operations proc_rd_ops = {
-    .read = proc_rd_read,
-    .write = proc_rd_write,
-};
-
-static int routine(void *pData)
-{
-	while (1) {
-		wait_event_interruptible(RoutineWaitQueue, g_bSetEnforceChanged != 0);
-		asussetenforce();
-		g_bSetEnforceChanged = 0;
-		g_bSetEnforceTimeout = 1;
-		wake_up_interruptible(&RoutineTimeoutWaitQueue);
-		if (kthread_should_stop())
-			break;
-	}
-	return 0;
-}
-
-static int routine_timeout(void *pData)
-{
-	while (1) {
-		wait_event_interruptible(RoutineTimeoutWaitQueue, g_bSetEnforceTimeout != 0);
-		//msleep(30000);
-		while(g_count > 0){
-			/* wait for 3 mins */
-			msleep(180000);
-			g_count--;
-		}
-		g_count = 0;
-		g_bSetEnforce = 1;
-		asussetenforce();
-		g_bSetEnforceTimeout = 0;
-
-		if (kthread_should_stop())
-			break;
-	}
-	return 0;
-}
-
-struct task_struct *g_pRoutine;
-struct task_struct *g_pRoutine_timeout;
-static void routine_init(void)
-{
-	if (g_pRoutine)
-		return;
-
-	g_pRoutine = kthread_run(routine, NULL, "kroutined");
-
-	if (g_pRoutine_timeout)
-		return;
-
-	g_pRoutine_timeout = kthread_run(routine_timeout, NULL, "kroutined_timeout");
-}
 
 static int __init kswapd_init(void)
 {
@@ -4302,8 +4230,6 @@ static int __init kswapd_init(void)
 					"mm/vmscan:online", kswapd_cpu_online,
 					NULL);
 	WARN_ON(ret < 0);
-	proc_create("rd", S_IRWXUGO, NULL, &proc_rd_ops);
-	routine_init();
 	return 0;
 }
 

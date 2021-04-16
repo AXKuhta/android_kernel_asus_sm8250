@@ -105,7 +105,6 @@
 static int kernel_init(void *);
 
 extern void init_IRQ(void);
-extern void fork_init(void);
 extern void radix_tree_init(void);
 
 /*
@@ -167,22 +166,6 @@ static int set_ftm_mode(char *str)
 }
 __setup("androidboot.pre-ftm=", set_ftm_mode);
 
-// ASUS_BSP +++ Add for asus debug
-int g_user_dbg_mode = 1;
-EXPORT_SYMBOL(g_user_dbg_mode);
-
-static int set_user_dbg_mode(char *str)
-{
-       if (strcmp("y", str) == 0)
-               g_user_dbg_mode = 1;
-       else
-               g_user_dbg_mode = 0;
-       g_user_dbg_mode = 1;
-       printk("Kernel dbg mode = %d\n", g_user_dbg_mode);
-       return 0;
-}
-__setup("dbg=", set_user_dbg_mode);
-// ASUS_BSP --- Add for asus debug
 
 // ASUS_BSP +++ get permissive status
 int permissive_enable = 0;
@@ -200,6 +183,23 @@ static int get_permissive_status(char *str)
 }
 __setup("androidboot.selinux=", get_permissive_status);
 // ASUS_BSP --- get permissive status
+
+// ASUS_BSP +++ Add for asus debug
+int g_user_dbg_mode = 1;
+EXPORT_SYMBOL(g_user_dbg_mode);
+
+static int set_user_dbg_mode(char *str)
+{
+       if (strcmp("y", str) == 0)
+               g_user_dbg_mode = 1;
+       else
+               g_user_dbg_mode = 0;
+       g_user_dbg_mode = 1;
+       printk("Kernel dbg mode = %d\n", g_user_dbg_mode);
+       return 0;
+}
+__setup("dbg=", set_user_dbg_mode);
+// ASUS_BSP --- Add for asus debug
 
 #ifdef ASUS_ZS661KS_PROJECT
 bool g_Recovery_mode = false;
@@ -1063,6 +1063,29 @@ static inline void initcall_debug_enable(void)
 }
 #endif
 
+/* Report memory auto-initialization states for this boot. */
+static void __init report_meminit(void)
+{
+	const char *stack;
+
+	if (IS_ENABLED(CONFIG_INIT_STACK_ALL))
+		stack = "all";
+	else if (IS_ENABLED(CONFIG_GCC_PLUGIN_STRUCTLEAK_BYREF_ALL))
+		stack = "byref_all";
+	else if (IS_ENABLED(CONFIG_GCC_PLUGIN_STRUCTLEAK_BYREF))
+		stack = "byref";
+	else if (IS_ENABLED(CONFIG_GCC_PLUGIN_STRUCTLEAK_USER))
+		stack = "__user";
+	else
+		stack = "off";
+
+	pr_info("mem auto-init: stack:%s, heap alloc:%s, heap free:%s\n",
+		stack, want_init_on_alloc(GFP_KERNEL) ? "on" : "off",
+		want_init_on_free() ? "on" : "off");
+	if (want_init_on_free())
+		pr_info("mem auto-init: clearing system memory may take some time...\n");
+}
+
 /*
  * Set up kernel memory allocators
  */
@@ -1073,6 +1096,7 @@ static void __init mm_init(void)
 	 * bigger than MAX_ORDER unless SPARSEMEM.
 	 */
 	page_ext_init_flatmem();
+	report_meminit();
 	mem_init();
 	kmem_cache_init();
 	pgtable_init();
@@ -1106,13 +1130,6 @@ asmlinkage __visible void __init start_kernel(void)
 	page_address_init();
 	pr_notice("%s", linux_banner);
 	setup_arch(&command_line);
-	/*
-	 * Set up the the initial canary and entropy after arch
-	 * and after adding latent and command line entropy.
-	 */
-	add_latent_entropy();
-	add_device_randomness(command_line, strlen(command_line));
-	boot_init_stack_canary();
 	mm_init_cpumask(&init_mm);
 	setup_command_line(command_line);
 	setup_nr_cpu_ids();
@@ -1197,6 +1214,20 @@ asmlinkage __visible void __init start_kernel(void)
 	hrtimers_init();
 	softirq_init();
 	timekeeping_init();
+
+	/*
+	 * For best initial stack canary entropy, prepare it after:
+	 * - setup_arch() for any UEFI RNG entropy and boot cmdline access
+	 * - timekeeping_init() for ktime entropy used in rand_initialize()
+	 * - rand_initialize() to get any arch-specific entropy like RDRAND
+	 * - add_latent_entropy() to get any latent entropy
+	 * - adding command line entropy
+	 */
+	rand_initialize();
+	add_latent_entropy();
+	add_device_randomness(command_line, strlen(command_line));
+	boot_init_stack_canary();
+
 	time_init();
 	printk_safe_init();
 	perf_event_init();

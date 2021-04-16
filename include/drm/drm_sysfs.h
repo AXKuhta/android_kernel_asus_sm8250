@@ -10,12 +10,4 @@ void drm_class_device_unregister(struct device *dev);
 
 void drm_sysfs_hotplug_event(struct drm_device *dev);
 
-#ifdef ASUS_ZS661KS_PROJECT
-#define ASUS_NOTIFY_GHBM_ON_REQ        0
-#define ASUS_NOTIFY_GHBM_ON_READY      1
-#define ASUS_NOTIFY_SPOT_READY         2
-
-void asus_drm_notify(int var, int value);
-#endif
-
 #endif

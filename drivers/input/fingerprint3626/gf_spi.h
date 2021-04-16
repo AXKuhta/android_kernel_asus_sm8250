@@ -164,6 +164,7 @@ struct gf_dev {
 	struct notifier_block notifier;
 	char fb_black;
 	struct drm_panel *active_panel_asus;
+	struct wakeup_source *ws;
 };
 int parse_dt_panel(struct gf_dev *gf_dev);
 int gf_parse_dts(struct gf_dev *gf_dev);

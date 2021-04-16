@@ -22,6 +22,7 @@
 #define PERPH_SUBTYPE_OFFSET	0x05
 #define SUBTYPE_MASK		GENMASK(7, 0)
 #define INT_RT_STS_OFFSET	0x10
+#define SDAM_TYPE		0x2E
 
 /********************************
  *  CHGR Peripheral Registers  *
@@ -114,10 +115,8 @@ enum {
 #define JEITA_EN_HOT_SL_CCC_BIT			BIT(1)
 #define JEITA_EN_COLD_SL_CCC_BIT		BIT(0)
 
-#define JEITA_FVCOMP_CFG_HOT_REG		(CHGR_BASE + 0x91)
 #define JEITA_CCCOMP_CFG_HOT_REG		(CHGR_BASE + 0x92)
 #define JEITA_CCCOMP_CFG_COLD_REG		(CHGR_BASE + 0x93)
-#define JEITA_FVCOMP_CFG_COLD_REG		(CHGR_BASE + 0x86)
 
 #define CHGR_JEITA_THRESHOLD_BASE_REG(i)	(CHGR_BASE + 0x94 + (i * 4))
 #define CHGR_JEITA_HOT_THRESHOLD_MSB_REG	CHGR_JEITA_THRESHOLD_BASE_REG(0)
@@ -372,6 +371,7 @@ enum {
  ********************************/
 #define TYPE_C_SNK_STATUS_REG			(TYPEC_BASE + 0x06)
 #define DETECTED_SRC_TYPE_MASK			GENMASK(6, 0)
+#define SNK_DAM_MASK				GENMASK(6, 4)
 #define SNK_DAM_500MA_BIT			BIT(6)
 #define SNK_DAM_1500MA_BIT			BIT(5)
 #define SNK_DAM_3000MA_BIT			BIT(4)
@@ -591,10 +591,6 @@ enum {
 #define DIE_REG_H_THRESHOLD_MSB_REG		(MISC_BASE + 0xA0)
 
 //ASUS BSP : Add for INOV Skin Temp +++
-#define SKIN_SHDN_THRESHOLD_MSB			(MISC_BASE + 0xB0)
-#define SKIN_SHDN_THRESHOLD_LSB			(MISC_BASE + 0xB1)
-#define SKIN_RST_THRESHOLD_MSB			(MISC_BASE + 0xB2)
-#define SKIN_RST_THRESHOLD_LSB			(MISC_BASE + 0xB3)
 #define SKIN_H_THRESHOLD_MSB_REG		(MISC_BASE + 0XB4)
 #define SKIN_H_THRESHOLD_LSB_REG		(MISC_BASE + 0XB5)
 #define SKIN_L_THRESHOLD_MSB_REG		(MISC_BASE + 0XB6)
@@ -605,4 +601,8 @@ enum {
 /* SDAM regs */
 #define MISC_PBS_RT_STS_REG			(MISC_PBS_BASE + 0x10)
 #define PULSE_SKIP_IRQ_BIT			BIT(4)
+
+#define SDAM_QC_DET_STATUS_REG			0x58
+#define SDAM_QC_ADC_LSB_REG			0x54
+
 #endif /* __SMB5_CHARGER_REG_H */

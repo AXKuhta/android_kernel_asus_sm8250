@@ -126,13 +126,17 @@
 #define ICM_FIFO_SIZE_BYTE	1024
 #define ICM_FIFO_CNT_SIZE	2
 
-#define ICM206XX_ACCEL_DATA_SIZE	3
+#define ASUS_2ND_ACCEL_SENSOR_DATA_SIZE	3
 #define ASUS_2ND_ACCEL_SENSOR_IOC_MAGIC                      ('C')	///< icm206xx accel ioctl magic number 
-#define ICM206XX_ACCEL_IOCTL_DATA_READ           _IOR(ASUS_2ND_ACCEL_SENSOR_IOC_MAGIC, 1, int[ICM206XX_ACCEL_DATA_SIZE])	///< icm206xx accel ioctl command - Read data xyz
+#define ASUS_2ND_ACCEL_SENSOR_IOCTL_DATA_READ           _IOR(ASUS_2ND_ACCEL_SENSOR_IOC_MAGIC, 1, int[ASUS_2ND_ACCEL_SENSOR_DATA_SIZE])	///< icm206xx accel ioctl command - Read data xyz
 #define ASUS_2ND_ACCEL_SENSOR_IOCTL_DEBUG_MODE           _IOW(ASUS_2ND_ACCEL_SENSOR_IOC_MAGIC, 2, int)	///< RGB sensor ioctl command - Get debug mode
-#define ICM206XX_GYRO_DATA_SIZE	3
+#define ASUS_2ND_ACCEL_SENSOR_IOCTL_UPDATE_CALIBRATION           _IOW(ASUS_2ND_ACCEL_SENSOR_IOC_MAGIC, 3, int)	///< 2nd accel sensor ioctl command - Info update calibration
+
+#define ASUS_2ND_GYRO_SENSOR_DATA_SIZE	3
 #define ASUS_2ND_GYRO_SENSOR_IOC_MAGIC                      ('C')	///< icm206xx accel ioctl magic number 
-#define ICM206XX_GYRO_IOCTL_DATA_READ           _IOR(ASUS_2ND_GYRO_SENSOR_IOC_MAGIC, 1, int[ICM206XX_GYRO_DATA_SIZE])	///< icm206xx gyro ioctl command - Read data xyz
+#define ASUS_2ND_GYRO_SENSOR_IOCTL_DATA_READ           _IOR(ASUS_2ND_GYRO_SENSOR_IOC_MAGIC, 1, int[ASUS_2ND_GYRO_SENSOR_DATA_SIZE])	///< icm206xx gyro ioctl command - Read data xyz
+#define ASUS_2ND_GYRO_SENSOR_IOCTL_DEBUG_MODE           _IOW(ASUS_2ND_GYRO_SENSOR_IOC_MAGIC, 2, int)	///< 2nd gyro sensor ioctl command - Get debug mode
+#define ASUS_2ND_GYRO_SENSOR_IOCTL_UPDATE_CALIBRATION           _IOW(ASUS_2ND_GYRO_SENSOR_IOC_MAGIC, 3, int)	///< icm206xx gyro ioctl command - Info update calibration
 
 #define ICM_DEBUG_NODE
 

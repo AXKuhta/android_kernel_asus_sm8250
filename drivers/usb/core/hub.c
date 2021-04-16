@@ -18,6 +18,7 @@
 #include <linux/sched/mm.h>
 #include <linux/list.h>
 #include <linux/slab.h>
+#include <linux/kcov.h>
 #include <linux/ioctl.h>
 #include <linux/usb.h>
 #include <linux/usbdevice_fs.h>
@@ -36,7 +37,9 @@
 #include "otg_whitelist.h"
 
 #define USB_VENDOR_GENESYS_LOGIC		0x05e3
+#define USB_VENDOR_SMSC				0x0424
 #define HUB_QUIRK_CHECK_PORT_AUTOSUSPEND	0x01
+#define HUB_QUIRK_DISABLE_AUTOSUSPEND		0x02
 
 #define USB_TP_TRANSMISSION_DELAY	40	/* ns */
 #define USB_TP_TRANSMISSION_DELAY_MAX	65535	/* ns */
@@ -112,54 +115,8 @@ EXPORT_SYMBOL_GPL(ehci_cf_port_reset_rwsem);
 static void hub_release(struct kref *kref);
 static int usb_reset_and_verify_device(struct usb_device *udev);
 static int hub_port_disable(struct usb_hub *hub, int port1, int set_state);
-static int ProDock_hub1_bus = 0;
-static int ProDock_hub2_bus = 0;
-static int ProDock_hub1_dev = 0;
-static int ProDock_hub2_dev = 0;
-static int ProDock_extra_device_count = 0;
-static int ProDock_state = 0;
-module_param(ProDock_state, int, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(ProDock_state,
-		 "ProDock_state undetect=0, detect=1, with_device=2");
-char ProDock_fw_ver[5];
-module_param_string(ProDock_fw_ver, ProDock_fw_ver, sizeof(ProDock_fw_ver), S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(DT_hub1_ver,
-		 "ProDock_fw_ver");
-
-#ifdef CONFIG_USB_EC_DRIVER
-extern uint8_t gDongleType;
-#else
-static uint8_t gDongleType;
-#endif
-static int DT_extra_device_count = 0;
-static int DT_state = 0;
-module_param(DT_state, int, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(DT_state,
-		 "DT_state undetect=0, detect=1, with_device=2");
-
-//ASUS_BSP : Asus DT hub node add +++
-static int DT_hub_count = 0;
-static char DT_hub1_ver[5];
-module_param_string(DT_hub1_ver, DT_hub1_ver, sizeof(DT_hub1_ver), S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(DT_hub1_ver,
-		 "DT_hub1_version");
-static char DT_hub2_ver[5];
-module_param_string(DT_hub2_ver, DT_hub2_ver, sizeof(DT_hub2_ver), S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(DT_hub2_ver,
-		 "DT_hub2_version");
-//ASUS_BSP : Asus DT hub node add ---
-
-int get_prodock_state(void)
-{
-	return ProDock_state;
-}
-EXPORT_SYMBOL_GPL(get_prodock_state);
-
-int get_DT_state(void)
-{
-	return DT_state;
-}
-EXPORT_SYMBOL_GPL(get_DT_state);
+static bool hub_port_warm_reset_required(struct usb_hub *hub, int port1,
+		u16 portstatus);
 
 static inline char *portspeed(struct usb_hub *hub, int portstatus)
 {
@@ -1016,13 +973,17 @@ int usb_remove_device(struct usb_device *udev)
 {
 	struct usb_hub *hub;
 	struct usb_interface *intf;
+	int ret;
 
 	if (!udev->parent)	/* Can't remove a root hub */
 		return -EINVAL;
 	hub = usb_hub_to_struct_hub(udev->parent);
 	intf = to_usb_interface(hub->intfdev);
 
-	usb_autopm_get_interface(intf);
+	ret = usb_autopm_get_interface(intf);
+	if (ret < 0)
+		return ret;
+
 	set_bit(udev->portnum, hub->removed_bits);
 	hub_port_logical_disconnect(hub, udev->portnum);
 	usb_autopm_put_interface(intf);
@@ -1144,7 +1105,7 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 			goto abort;
 
 		if (udev || (portstatus & USB_PORT_STAT_CONNECTION))
-			dev_dbg(&port_dev->dev, "[USB] status %04x change %04x\n",
+			dev_dbg(&port_dev->dev, "status %04x change %04x\n",
 					portstatus, portchange);
 
 		/*
@@ -1169,6 +1130,11 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 				usb_clear_port_feature(hdev, port1,
 						   USB_PORT_FEAT_ENABLE);
 		}
+
+		/* Make sure a warm-reset request is handled by port_event */
+		if (type == HUB_RESUME &&
+		    hub_port_warm_reset_required(hub, port1, portstatus))
+			set_bit(port1, hub->event_bits);
 
 		/*
 		 * Add debounce if USB3 link is in polling/link training state.
@@ -1217,14 +1183,10 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 			 * PORT_OVER_CURRENT is not. So check for any of them.
 			 */
 			if (udev || (portstatus & USB_PORT_STAT_CONNECTION) ||
+			    (portchange & USB_PORT_STAT_C_CONNECTION) ||
 			    (portstatus & USB_PORT_STAT_OVERCURRENT) ||
 			    (portchange & USB_PORT_STAT_C_OVERCURRENT))
 				set_bit(port1, hub->change_bits);
-			else if ((portchange & USB_PORT_STAT_C_LINK_STATE) &&
-			    ((portstatus & USB_PORT_STAT_LINK_STATE) == USB_SS_PORT_LS_SS_INACTIVE)) {
-				dev_info(&port_dev->dev, "[USB] hub_activate, update the change_bits when status error");
-				set_bit(port1, hub->change_bits);
-			}
 
 		} else if (portstatus & USB_PORT_STAT_ENABLE) {
 			bool port_resumed = (portstatus &
@@ -1241,20 +1203,11 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 			if (portchange || (hub_is_superspeed(hub->hdev) &&
 						port_resumed))
 				set_bit(port1, hub->change_bits);
-			else if (ProDock_state != 0 ){
-				need_debounce_delay = true;
-				dev_info(&port_dev->dev, "[USB] Prodongle hub, change %04x port_resume %u need_debounce_delay %u\n",
-						portchange, port_resumed, need_debounce_delay);
-			}
+
 		} else if (udev->persist_enabled) {
 #ifdef CONFIG_PM
 			udev->reset_resume = 1;
 #endif
-			/* Don't set the change_bits when the device
-			 * was powered off.
-			 */
-			if (test_bit(port1, hub->power_bits))
-				set_bit(port1, hub->change_bits);
 
 		} else {
 			/* The power session is gone; tell hub_wq */
@@ -1760,6 +1713,10 @@ static void hub_disconnect(struct usb_interface *intf)
 	kfree(hub->buffer);
 
 	pm_suspend_ignore_children(&intf->dev, false);
+
+	if (hub->quirk_disable_autosuspend)
+		usb_autopm_put_interface(intf);
+
 	kref_put(&hub->kref, hub_release);
 }
 
@@ -1889,6 +1846,11 @@ static int hub_probe(struct usb_interface *intf, const struct usb_device_id *id)
 
 	if (id->driver_info & HUB_QUIRK_CHECK_PORT_AUTOSUSPEND)
 		hub->quirk_check_port_auto_suspend = 1;
+
+	if (id->driver_info & HUB_QUIRK_DISABLE_AUTOSUSPEND) {
+		hub->quirk_disable_autosuspend = 1;
+		usb_autopm_get_interface_no_resume(intf);
+	}
 
 	if (hub_configure(hub, &desc->endpoint[0].desc) >= 0)
 		return 0;
@@ -2205,87 +2167,8 @@ void usb_disconnect(struct usb_device **pdev)
 	 * this quiesces everything except pending urbs.
 	 */
 	usb_set_device_state(udev, USB_STATE_NOTATTACHED);
-	dev_info(&udev->dev, "[USB] USB disconnect, bus number: %d, device number: %d\n",
-			udev->bus->busnum, udev->devnum);
-
-	if (udev->bus->busnum==ProDock_hub1_bus) {
-		if (udev->devnum==ProDock_hub1_dev) {
-			ProDock_hub1_bus=0;
-			ProDock_hub1_dev=0;
-			ProDock_state=0;
-			memset(ProDock_fw_ver, 0, sizeof(ProDock_fw_ver));
-			dev_info(&udev->dev, "[USB_prodock] ProDock hub1 disconnect\n");
-		} else {
-			if (ProDock_extra_device_count>0) {
-				ProDock_extra_device_count-=1;
-			}
-			dev_info(&udev->dev, "[USB_prodock] device on ProDock disconnect\n");
-		}
-	} else if (udev->bus->busnum==ProDock_hub2_bus){
-		if (udev->devnum==ProDock_hub2_dev) {
-			ProDock_hub2_bus=0;
-			ProDock_hub2_dev=0;
-			dev_info(&udev->dev, "[USB_prodock] ProDock hub2 disconnect\n");
-		} else {
-			if (ProDock_extra_device_count>0) {
-				ProDock_extra_device_count-=1;
-			}
-			dev_info(&udev->dev, "[USB_prodock] device on ProDock disconnect\n");
-		}
-	}
-	if (ProDock_state==0) {
-		ProDock_extra_device_count=0;
-	} else if (ProDock_state>0 && ProDock_extra_device_count==0) {
-		ProDock_state=1;
-	}
-	dev_info(&udev->dev, "[USB_prodock] ProDock_state=%d, extra_device_count=%d\n", ProDock_state, ProDock_extra_device_count);
-
-	if ( gDongleType == 3 ) {
-		if ( (le16_to_cpu(udev->descriptor.idVendor)==0x1D6B && le16_to_cpu(udev->descriptor.idProduct)==0x0002) //xHCI Host Controller 2.0
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x1D6B && le16_to_cpu(udev->descriptor.idProduct)==0x0003) //xHCI Host Controller 3.0
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x05E3 && le16_to_cpu(udev->descriptor.idProduct)==0x0610) //USB2.1 Hub
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x05E3 && le16_to_cpu(udev->descriptor.idProduct)==0x0608) //USB2.0 Hub
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x05E3 && le16_to_cpu(udev->descriptor.idProduct)==0x0620) //USB3.1 Hub
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x05E3 && le16_to_cpu(udev->descriptor.idProduct)==0x0F01) //Billboard
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x0BDA && le16_to_cpu(udev->descriptor.idProduct)==0x4A45) //Realtek USB2.0 Audio HID
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x0BDA && le16_to_cpu(udev->descriptor.idProduct)==0x48F0) //USB Audio SPDIF HID
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x0BDA && le16_to_cpu(udev->descriptor.idProduct)==0x8153) //USB 10/100/1000 LAN
-		) {
-			dev_info(&udev->dev, "[USB_DT] internal device on DT disconnect\n");
-
-			//ASUS_BSP : Asus DT hub node add +++
-			if (le16_to_cpu(udev->descriptor.idVendor)==0x05E3 && le16_to_cpu(udev->descriptor.idProduct)==0x0610) {//USB2.1 Hub
-				DT_hub_count-=1;
-				dev_info(&udev->dev, "[USB_DT] DT_hub_count=%d\n", DT_hub_count);
-				if( DT_hub_count==1 ) {
-					memset(DT_hub2_ver, 0, sizeof(DT_hub2_ver));
-				} else if ( DT_hub_count==0 ) {
-					memset(DT_hub1_ver, 0, sizeof(DT_hub1_ver));
-				}
-			}
-			//ASUS_BSP : Asus DT hub node add ---
-
-		} else {
-			if (DT_extra_device_count>0) {
-				DT_extra_device_count-=1;
-			}
-			dev_info(&udev->dev, "[USB_DT] extra device on DT disconnect\n");
-		}
-		if (DT_state>0 && DT_extra_device_count==0) {
-			DT_state=1;
-		}
-	} else {
-		DT_state=0;
-		DT_extra_device_count=0;
-
-//ASUS_BSP : Asus DT hub node add +++
-		DT_hub_count=0;
-		memset(DT_hub1_ver, 0, sizeof(DT_hub1_ver));
-		memset(DT_hub2_ver, 0, sizeof(DT_hub2_ver));
-//ASUS_BSP : Asus DT hub node add ---
-
-	}
-	dev_info(&udev->dev, "[USB_DT] DT_state=%d, extra_device_count=%d\n", DT_state, DT_extra_device_count);
+	dev_info(&udev->dev, "[USB] USB disconnect, device number %d\n",
+			udev->devnum);
 
 	/*
 	 * Ensure that the pm runtime code knows that the USB device
@@ -2373,79 +2256,6 @@ static void announce_device(struct usb_device *udev)
 	show_string(udev, "[USB] Product", udev->product);
 	show_string(udev, "[USB] Manufacturer", udev->manufacturer);
 	show_string(udev, "[USB] SerialNumber", udev->serial);
-
-	if (le16_to_cpu(udev->descriptor.idVendor)==0x048D && le16_to_cpu(udev->descriptor.idProduct)==0x5212 //Station billboard
-	){
-		dev_info(&udev->dev, "[USB] DT/Station Billboard enable autosuspend\n");
-		usb_enable_autosuspend(udev);
-	}
-
-	if (udev->bus->busnum==ProDock_hub1_bus){
-		if (le16_to_cpu(udev->descriptor.idVendor)==0x0BDA && le16_to_cpu(udev->descriptor.idProduct)==0x8153){
-			dev_info(&udev->dev, "[USB_prodock] ProDock eth 8153 detected\n");
-		} else {
-			ProDock_state=2;
-			ProDock_extra_device_count+=1;
-			dev_info(&udev->dev, "[USB_prodock] ProDock extra device detected\n");
-		}
-	} else if (udev->bus->busnum==ProDock_hub2_bus){
-		if (le16_to_cpu(udev->descriptor.idVendor)==0x0BDA && le16_to_cpu(udev->descriptor.idProduct)==0x8153){
-			dev_info(&udev->dev, "[USB_prodock] ProDock eth 8153 detected\n");
-		} else {
-			ProDock_state=2;
-			ProDock_extra_device_count+=1;
-			dev_info(&udev->dev, "[USB_prodock] ProDock extra device detected\n");
-		}
-	}
-	if (le16_to_cpu(udev->descriptor.idVendor)==0x2109 && le16_to_cpu(udev->descriptor.idProduct)==0x2817 && strcmp(udev->product,"ASUS Pro-Dock USB2.0")==0) {
-		ProDock_hub1_bus=udev->bus->busnum;
-		ProDock_hub1_dev=udev->devnum;
-		ProDock_state=1;
-		sprintf(ProDock_fw_ver, "%04x", le16_to_cpu(udev->descriptor.bcdDevice));
-		dev_info(&udev->dev, "[USB_prodock] ASUS Pro-Dock HUB2.0 detected, ProDock_fw_ver=%s\n", ProDock_fw_ver);
-	} else if (le16_to_cpu(udev->descriptor.idVendor)==0x2109 && le16_to_cpu(udev->descriptor.idProduct)==0x0817 && strcmp(udev->product,"ASUS Pro-Dock USB3.0")==0) {
-		ProDock_hub2_bus=udev->bus->busnum;
-		ProDock_hub2_dev=udev->devnum;
-		dev_info(&udev->dev, "[USB_prodock] ASUS Pro-Dock HUB3.0 detected\n");
-	}
-	dev_info(&udev->dev, "[USB_prodock] ProDock_state=%d, extra_device_count=%d\n", ProDock_state, ProDock_extra_device_count);
-
-	if ( gDongleType == 3 ) {
-		if ( (le16_to_cpu(udev->descriptor.idVendor)==0x1D6B && le16_to_cpu(udev->descriptor.idProduct)==0x0002) //xHCI Host Controller 2.0
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x1D6B && le16_to_cpu(udev->descriptor.idProduct)==0x0003) //xHCI Host Controller 3.0
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x05E3 && le16_to_cpu(udev->descriptor.idProduct)==0x0610) //USB2.1 Hub
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x05E3 && le16_to_cpu(udev->descriptor.idProduct)==0x0608) //USB2.0 Hub
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x05E3 && le16_to_cpu(udev->descriptor.idProduct)==0x0620) //USB3.1 Hub
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x05E3 && le16_to_cpu(udev->descriptor.idProduct)==0x0F01) //Billboard
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x0BDA && le16_to_cpu(udev->descriptor.idProduct)==0x4A45) //Realtek USB2.0 Audio HID
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x0BDA && le16_to_cpu(udev->descriptor.idProduct)==0x48F0) //USB Audio SPDIF HID
-		|| (le16_to_cpu(udev->descriptor.idVendor)==0x0BDA && le16_to_cpu(udev->descriptor.idProduct)==0x8153) //USB 10/100/1000 LAN
-		) {
-			if (DT_state==0)
-				DT_state=1;
-			dev_info(&udev->dev, "[USB_DT] DT internal device detect\n");
-
-			//ASUS_BSP : Asus DT hub node add +++
-			if (le16_to_cpu(udev->descriptor.idVendor)==0x05E3 && le16_to_cpu(udev->descriptor.idProduct)==0x0610) {//USB2.1 Hub
-				DT_hub_count+=1;
-				dev_info(&udev->dev, "[USB_DT] DT_hub_count=%d\n", DT_hub_count);
-				if( DT_hub_count==1 ) {
-					sprintf(DT_hub1_ver, "%04x", le16_to_cpu(udev->descriptor.bcdDevice));
-					dev_info(&udev->dev, "[USB_DT] DT_hub1_ver=%s\n", DT_hub1_ver);
-				} else if ( DT_hub_count==2 ) {
-					sprintf(DT_hub2_ver, "%04x", le16_to_cpu(udev->descriptor.bcdDevice));
-					dev_info(&udev->dev, "[USB_DT] DT_hub2_ver=%s\n", DT_hub2_ver);
-				}
-			}
-			//ASUS_BSP : Asus DT hub node add ---
-
-		} else {
-			DT_state=2;
-			DT_extra_device_count+=1;
-			dev_info(&udev->dev, "[USB_DT] DT extra device detected\n");
-		}
-		dev_info(&udev->dev, "[USB_DT] DT_state=%d, DT_extra_device_count=%d\n", DT_state, DT_extra_device_count);
-	}
 }
 #else
 static inline void announce_device(struct usb_device *udev) { }
@@ -2870,7 +2680,7 @@ static unsigned hub_is_wusb(struct usb_hub *hub)
 #define SET_ADDRESS_TRIES	2
 #define GET_DESCRIPTOR_TRIES	2
 #define SET_CONFIG_TRIES	(2 * (use_both_schemes + 1))
-#define USE_NEW_SCHEME(i, scheme)	((i) / 2 == (int)scheme)
+#define USE_NEW_SCHEME(i, scheme)	((i) / 2 == (int)(scheme))
 
 #define HUB_ROOT_RESET_TIME	60	/* times are in msec */
 #define HUB_SHORT_RESET_TIME	10
@@ -5485,7 +5295,7 @@ static void port_event(struct usb_hub *hub, int port1)
 	 * SS.Inactive state.
 	 */
 	if (hub_port_warm_reset_required(hub, port1, portstatus)) {
-		dev_info(&port_dev->dev, "[USB] do warm reset\n");
+		dev_dbg(&port_dev->dev, "do warm reset\n");
 		if (!udev || !(portstatus & USB_PORT_STAT_CONNECTION)
 				|| udev->state == USB_STATE_NOTATTACHED) {
 			if (hub_port_reset(hub, port1, NULL,
@@ -5519,6 +5329,8 @@ static void hub_event(struct work_struct *work)
 	hdev = hub->hdev;
 	hub_dev = hub->intfdev;
 	intf = to_usb_interface(hub_dev);
+
+	kcov_remote_start_usb((u64)hdev->bus->busnum);
 
 	dev_dbg(hub_dev, "state %d ports %d chg %04x evt %04x\n",
 			hdev->state, hdev->maxchild,
@@ -5626,9 +5438,15 @@ out_hdev_lock:
 	/* Balance the stuff in kick_hub_wq() and allow autosuspend */
 	usb_autopm_put_interface(intf);
 	kref_put(&hub->kref, hub_release);
+
+	kcov_remote_stop();
 }
 
 static const struct usb_device_id hub_id_table[] = {
+    { .match_flags = USB_DEVICE_ID_MATCH_VENDOR | USB_DEVICE_ID_MATCH_INT_CLASS,
+      .idVendor = USB_VENDOR_SMSC,
+      .bInterfaceClass = USB_CLASS_HUB,
+      .driver_info = HUB_QUIRK_DISABLE_AUTOSUSPEND},
     { .match_flags = USB_DEVICE_ID_MATCH_VENDOR
 			| USB_DEVICE_ID_MATCH_INT_CLASS,
       .idVendor = USB_VENDOR_GENESYS_LOGIC,
@@ -5960,7 +5778,7 @@ re_enumerate_no_bos:
 
 /**
  * usb_reset_device - warn interface drivers and perform a USB port reset
- * @udev: device to reset (not in SUSPENDED or NOTATTACHED state)
+ * @udev: device to reset (not in NOTATTACHED state)
  *
  * Warns all drivers bound to registered interfaces (using their pre_reset
  * method), performs the port reset, and then lets the drivers know that
@@ -5988,8 +5806,7 @@ int usb_reset_device(struct usb_device *udev)
 	struct usb_host_config *config = udev->actconfig;
 	struct usb_hub *hub = usb_hub_to_struct_hub(udev->parent);
 
-	if (udev->state == USB_STATE_NOTATTACHED ||
-			udev->state == USB_STATE_SUSPENDED) {
+	if (udev->state == USB_STATE_NOTATTACHED) {
 		dev_dbg(&udev->dev, "device reset not allowed in state %d\n",
 				udev->state);
 		return -EINVAL;

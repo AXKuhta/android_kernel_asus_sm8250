@@ -2456,15 +2456,16 @@ static int icm206xx_accel_miscRelease(struct inode *inode, struct file *file)
 static long icm206xx_accel_miscIoctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	int ret = 0;
-	int dataI[ICM206XX_ACCEL_DATA_SIZE];
+	int dataI[ASUS_2ND_ACCEL_SENSOR_DATA_SIZE];
 	u8 shift;
+	static int l_counter = 0;
 	if (!g_icm206xx_sensor) {
 		icm_errmsg("null icm ctrl!");
 		ret = -1;
 		goto end;
 	}
 	switch (cmd) {
-		case ICM206XX_ACCEL_IOCTL_DATA_READ:
+		case ASUS_2ND_ACCEL_SENSOR_IOCTL_DATA_READ:
 			icm_acc_data_process(g_icm206xx_sensor);
 			shift = icm_accel_fs_shift[g_icm206xx_sensor->cfg.accel_fs];
 			dataI[0] = g_icm206xx_sensor->axis.x << shift;
@@ -2472,6 +2473,11 @@ static long icm206xx_accel_miscIoctl(struct file *file, unsigned int cmd, unsign
 			dataI[2] = g_icm206xx_sensor->axis.z << shift;
 			icm_dbgmsg("cmd = DATA_READ, data[0] = %d, data[1] = %d, data[2] = %d\n", dataI[0], dataI[1], dataI[2]);
 			ret = copy_to_user((int __user*)arg, &dataI, sizeof(dataI));
+			break;
+		case ASUS_2ND_ACCEL_SENSOR_IOCTL_UPDATE_CALIBRATION:
+			icm_dbgmsg("cmd = UPDATE_CALIBRATION\n");
+			input_report_abs(g_icm206xx_sensor->accel_dev, ABS_BRAKE, ++l_counter);
+			input_sync(g_icm206xx_sensor->accel_dev);
 			break;
 		default:
 			ret = -1;
@@ -2521,10 +2527,11 @@ static int icm206xx_gyro_miscRelease(struct inode *inode, struct file *file)
 static long icm206xx_gyro_miscIoctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	int ret = 0;
-	int dataI[ICM206XX_GYRO_DATA_SIZE];
+	int dataI[ASUS_2ND_GYRO_SENSOR_DATA_SIZE];
 	u8 shift;
+	static int l_counter = 0;
 	switch (cmd) {
-		case ICM206XX_GYRO_IOCTL_DATA_READ:
+		case ASUS_2ND_GYRO_SENSOR_IOCTL_DATA_READ:
 			icm_read_gyro_data(g_icm206xx_sensor, &g_icm206xx_sensor->axis);
 			icm_remap_gyro_data(&g_icm206xx_sensor->axis,
 				g_icm206xx_sensor->pdata.place);
@@ -2534,6 +2541,11 @@ static long icm206xx_gyro_miscIoctl(struct file *file, unsigned int cmd, unsigne
 			dataI[2] = g_icm206xx_sensor->axis.rz >> shift;
 			icm_dbgmsg("cmd = DATA_READ, data[0] = %d, data[1] = %d, data[2] = %d\n", dataI[0], dataI[1], dataI[2]);
 			ret = copy_to_user((int __user*)arg, &dataI, sizeof(dataI));
+			break;
+		case ASUS_2ND_GYRO_SENSOR_IOCTL_UPDATE_CALIBRATION:
+			icm_dbgmsg("cmd = UPDATE_CALIBRATION\n");
+			input_report_abs(g_icm206xx_sensor->gyro_dev, ABS_BRAKE, ++l_counter);
+			input_sync(g_icm206xx_sensor->gyro_dev);
 			break;
 		default:
 			ret = -1;
@@ -2645,6 +2657,7 @@ static struct input_dev* icm206xx_input_setup(struct icm_sensor *sensor, int sen
 	input_set_capability(l_dev, EV_ABS, ABS_WHEEL); //sec
 	input_set_capability(l_dev, EV_ABS, ABS_GAS); //nsec
 	input_set_capability(l_dev, EV_ABS, ABS_MISC);
+	input_set_capability(l_dev, EV_ABS, ABS_BRAKE);
 	input_set_drvdata(l_dev, sensor);
 
 	if (sensor_type == 0) {
@@ -2813,7 +2826,6 @@ static void icm_deinit()
 			gpio_free((g_icm206xx_sensor->pdata).gpio_int);
 			l_init_status->gpio_inited = false;
 		}
-		wakeup_source_trash(&g_icm206xx_sensor->icm206xx_wakeup_source);
 		devm_kfree(g_icm206xx_sensor->dev, g_icm206xx_sensor);
 		g_icm206xx_sensor = NULL;
 	}
@@ -2944,7 +2956,7 @@ static int icm_spi_probe(struct spi_device *pdev)
 	dev_set_drvdata(&pdev->dev, sensor);
 	g_icm206xx_sensor = sensor;
 	pdata = &sensor->pdata;
-	wakeup_source_init(&sensor->icm206xx_wakeup_source, "icm206xx_wakeup_source");
+	device_init_wakeup(sensor->dev, true);
 
 	if (pdev->dev.of_node) {
 		ret = icm_parse_dt(&pdev->dev, pdata);
@@ -3348,7 +3360,7 @@ static int icm_power_up(struct icm_sensor *sensor)
 	} else{
 		icm_errmsg("invalid irq");
 	}
-	__pm_stay_awake(&g_icm206xx_sensor->icm206xx_wakeup_source);
+	pm_stay_awake(g_icm206xx_sensor->dev);
 exit:
 	return rc;
 }
@@ -3378,7 +3390,7 @@ static int icm_power_down(struct icm_sensor *sensor)
 	if (sensor->vdd) {
 		regulator_disable(sensor->vdd);
 	}
-	__pm_relax(&g_icm206xx_sensor->icm206xx_wakeup_source);
+	pm_relax(g_icm206xx_sensor->dev);
 	return rc;
 }
 

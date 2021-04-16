@@ -107,6 +107,7 @@ bool enter_jeta_cc1_flag = false;
 bool enter_jeta_cc2_flag = false;
 
 bool virtual_over_temp=false;
+bool asus_increase_vbus_in_process=false;
 
 extern bool smartchg_slow_flag;
 extern int slow_charginglimit;
@@ -227,7 +228,7 @@ enum {
 	JEITA_CC2_NO_CONTROL_CHARGING,
 };
 
-struct wakeup_source asus_chg_ws;
+struct wakeup_source *asus_chg_ws = NULL;
 static bool create_asus_chg_ws = false;
 extern bool asus_chg_ws_disable;
 
@@ -377,14 +378,21 @@ void asus_smblib_stay_awake(struct smb_charger *chg)
 
 	if (create_asus_chg_ws) {
 		CHG_DBG("ASUS set awake\n");
-		__pm_stay_awake(&asus_chg_ws);
+		__pm_stay_awake(asus_chg_ws);
 	} else {
 		CHG_DBG_E("ASUS set awake fail, asus_chg_ws not initial\n");
-		wakeup_source_init(&asus_chg_ws, "asus_chg_ws");
+
+		asus_chg_ws =
+			wakeup_source_register(chg->dev, "asus_chg_ws");
+		if (!asus_chg_ws) {
+			CHG_DBG_E("ASUS register wakeup_source fail\n");
+			return;
+		}
+
 		create_asus_chg_ws = true;
 
 		CHG_DBG("ASUS set awake after asus_chg_ws initial\n");
-		__pm_stay_awake(&asus_chg_ws);
+		__pm_stay_awake(asus_chg_ws);
 	}
 }
 
@@ -395,7 +403,7 @@ void asus_smblib_relax(struct smb_charger *chg)
 
 	if (create_asus_chg_ws) {
 		CHG_DBG("ASUS set relax\n");
-		__pm_relax(&asus_chg_ws);
+		__pm_relax(asus_chg_ws);
 	} else {
 		CHG_DBG_E("ASUS set relax fail, asus_chg_ws not initial\n");
 	}
@@ -1514,8 +1522,8 @@ static const struct apsd_result *smblib_update_usb_type(struct smb_charger *chg)
 			chg->real_charger_type = apsd_result->pst;
 	}
 
-	smblib_dbg(chg, PR_MISC, "APSD=%s PD=%d\n",
-					apsd_result->name, chg->pd_active);
+	smblib_dbg(chg, PR_MISC, "APSD=%s PD=%d QC3P5=%d\n",
+			apsd_result->name, chg->pd_active, chg->qc3p5_detected);
 	if (chg->asus_print_usb_src_change) {
 		CHG_DBG_E("FAKE = %d, APSD = %s, PD = %d\n",
 				asus_adapter_detecting_flag, apsd_result->name, chg->pd_active);
@@ -1527,9 +1535,6 @@ static const struct apsd_result *smblib_update_usb_type(struct smb_charger *chg)
 		if (cancel_delayed_work(&smbchg_dev->asus_chg_flow_work))
 			schedule_delayed_work(&smbchg_dev->asus_chg_flow_work, msecs_to_jiffies(0));
 	}
-
-	smblib_dbg(chg, PR_MISC, "APSD=%s PD=%d QC3P5=%d\n",
-			apsd_result->name, chg->pd_active, chg->qc3p5_detected);
 
 	return apsd_result;
 }
@@ -1779,6 +1784,7 @@ static int smblib_get_pulse_cnt(struct smb_charger *chg, int *count)
 #define USBIN_150MA	150000
 #define USBIN_500MA	500000
 #define USBIN_900MA	900000
+#define USBIN_1000MA	1000000
 static int set_sdp_current(struct smb_charger *chg, int icl_ua)
 {
 	int rc;
@@ -2498,13 +2504,14 @@ static bool is_charging_paused(struct smb_charger *chg)
 	return val & CHARGING_PAUSE_CMD_BIT;
 }
 
+#define CUTOFF_COUNT		3
 int smblib_get_prop_batt_status(struct smb_charger *chg,
 				union power_supply_propval *val)
 {
 	union power_supply_propval pval = {0, };
 	bool usb_online, dc_online;
 	u8 stat;
-	int rc, suspend = 0;
+	int rc, suspend = 0, input_present = 0;
 
 	static int now_bat_status = POWER_SUPPLY_STATUS_DISCHARGING, pre_bat_status = POWER_SUPPLY_STATUS_DISCHARGING;
 	static int now_chg_status = 7, pre_chg_status = 7;
@@ -2537,6 +2544,28 @@ int smblib_get_prop_batt_status(struct smb_charger *chg,
 	if (pval.intval == POWER_SUPPLY_HEALTH_OVERVOLTAGE) {
 		val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
 		return 0;
+	}
+
+	/*
+	 * If SOC = 0 and we are discharging with input connected, report
+	 * the battery status as DISCHARGING.
+	 */
+	smblib_is_input_present(chg, &input_present);
+	rc = smblib_get_prop_from_bms(chg, POWER_SUPPLY_PROP_CAPACITY, &pval);
+	if (!rc && pval.intval == 0 && input_present) {
+		rc = smblib_get_prop_from_bms(chg,
+				POWER_SUPPLY_PROP_CURRENT_NOW, &pval);
+		if (!rc && pval.intval > 0) {
+			if (chg->cutoff_count > CUTOFF_COUNT) {
+				val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+				return 0;
+			}
+			chg->cutoff_count++;
+		} else {
+			chg->cutoff_count = 0;
+		}
+	} else {
+		chg->cutoff_count = 0;
 	}
 
 	if (chg->dbc_usbov) {
@@ -2775,7 +2804,8 @@ int smblib_get_prop_batt_health(struct smb_charger *chg,
 			 * If Vbatt is within 40mV above Vfloat, then don't
 			 * treat it as overvoltage.
 			 */
-			effective_fv_uv = get_effective_result(chg->fv_votable);
+			effective_fv_uv = get_effective_result_locked(
+							chg->fv_votable);
 			if(effective_fv_uv == 4080000)
 			{
 				if(pval.intval >= 4380000)
@@ -4565,6 +4595,24 @@ int smblib_get_prop_input_current_settled(struct smb_charger *chg,
 	return smblib_get_charge_param(chg, &chg->param.icl_stat, &val->intval);
 }
 
+int smblib_get_prop_input_current_max(struct smb_charger *chg,
+					  union power_supply_propval *val)
+{
+	int icl_ua = 0, rc;
+
+	rc = smblib_get_charge_param(chg, &chg->param.usb_icl, &icl_ua);
+	if (rc < 0)
+		return rc;
+
+	if (is_override_vote_enabled_locked(chg->usb_icl_votable) &&
+					icl_ua < USBIN_1000MA) {
+		val->intval = USBIN_1000MA;
+		return 0;
+	}
+
+	return smblib_get_charge_param(chg, &chg->param.icl_stat, &val->intval);
+}
+
 int smblib_get_prop_input_voltage_settled(struct smb_charger *chg,
 						union power_supply_propval *val)
 {
@@ -5667,6 +5715,33 @@ int smblib_get_charge_current(struct smb_charger *chg,
 	return 0;
 }
 
+#define IADP_OVERHEAT_UA	500000
+int smblib_set_prop_thermal_overheat(struct smb_charger *chg,
+						int therm_overheat)
+{
+	int icl_ua = 0;
+
+	if (chg->thermal_overheat == !!therm_overheat)
+		return 0;
+
+	/* Configure ICL to 500mA in case system health is Overheat */
+	if (therm_overheat)
+		icl_ua = IADP_OVERHEAT_UA;
+
+	if (!chg->cp_disable_votable)
+		chg->cp_disable_votable = find_votable("CP_DISABLE");
+
+	if (chg->cp_disable_votable) {
+		vote(chg->cp_disable_votable, OVERHEAT_LIMIT_VOTER,
+							therm_overheat, 0);
+		vote(chg->usb_icl_votable, OVERHEAT_LIMIT_VOTER,
+							therm_overheat, icl_ua);
+	}
+
+	chg->thermal_overheat = !!therm_overheat;
+	return 0;
+}
+
 /************************
  * ASUS GET POWER_SUPPLY DATA *
  ************************/
@@ -5863,6 +5938,8 @@ void asus_typec_removal_function(struct smb_charger *chg)
 	second_apsd=false;
 
 	virtual_over_temp=false;
+
+	asus_increase_vbus_in_process = false;
 
 	is_QC2_HVDCP = false;
 
@@ -7543,32 +7620,19 @@ void asus_enable_inov_work(struct work_struct *work)
 	asus_enable_inov(usb_present);
 }
 
-#define IADP_OVERHEAT_UA	500000
-int smblib_set_prop_thermal_overheat(struct smb_charger *chg,
-						int therm_overheat)
+//ASUS_BSP LiJen +++ enter shipping mode when poweroff & full & online
+void asus_set_ship_mode_poweroff(void)
 {
-	int icl_ua = 0;
+	int bat_capacity;
+	bat_capacity = asus_get_prop_batt_capacity(smbchg_dev);
 
-	if (chg->thermal_overheat == !!therm_overheat)
-		return 0;
-
-	/* Configure ICL to 500mA in case system health is Overheat */
-	if (therm_overheat)
-		icl_ua = IADP_OVERHEAT_UA;
-
-	if (!chg->cp_disable_votable)
-		chg->cp_disable_votable = find_votable("CP_DISABLE");
-
-	if (chg->cp_disable_votable) {
-		vote(chg->cp_disable_votable, OVERHEAT_LIMIT_VOTER,
-							therm_overheat, 0);
-		vote(chg->usb_icl_votable, OVERHEAT_LIMIT_VOTER,
-							therm_overheat, icl_ua);
+	if(bat_capacity == FULL_CAPACITY && g_fg->online_status){
+		CHG_DBG("%d \n",__func__);
+		smblib_masked_write(smbchg_dev, SHIP_MODE_REG, SHIP_MODE_EN_BIT, 1);
+		msleep(3000);
 	}
-
-	chg->thermal_overheat = !!therm_overheat;
-	return 0;
 }
+//ASUS_BSP LiJen --- enter shipping mode when poweroff & full & online
 
 /**********************
  * INTERRUPT HANDLERS *
@@ -7916,12 +7980,115 @@ irqreturn_t icl_change_irq_handler(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+static int smblib_role_switch_failure(struct smb_charger *chg)
+{
+	int rc = 0;
+	union power_supply_propval pval = {0, };
+
+	if (!chg->use_extcon)
+		return 0;
+
+	rc = smblib_get_prop_usb_present(chg, &pval);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't get usb presence status rc=%d\n",
+				rc);
+		return rc;
+	}
+
+	/*
+	 * When role switch fails notify the
+	 * current charger state to usb driver.
+	 */
+	if (pval.intval) {
+		smblib_dbg(chg, PR_MISC, " Role reversal failed, notifying device mode to usb driver.\n");
+		smblib_notify_device_mode(chg, true);
+	}
+
+	return rc;
+}
+
+static int typec_partner_register(struct smb_charger *chg)
+{
+	int typec_mode, rc = 0;
+
+	mutex_lock(&chg->typec_lock);
+
+	if (!chg->typec_port || chg->pr_swap_in_progress)
+		goto unlock;
+
+	if (!chg->typec_partner) {
+		if (chg->sink_src_mode == AUDIO_ACCESS_MODE)
+			chg->typec_partner_desc.accessory =
+					TYPEC_ACCESSORY_AUDIO;
+		else
+			chg->typec_partner_desc.accessory =
+					TYPEC_ACCESSORY_NONE;
+
+		chg->typec_partner = typec_register_partner(chg->typec_port,
+				&chg->typec_partner_desc);
+		if (IS_ERR(chg->typec_partner)) {
+			rc = PTR_ERR(chg->typec_partner);
+			pr_err("failed to register typec_partner rc=%d\n", rc);
+			goto unlock;
+		}
+	}
+
+	typec_mode = smblib_get_prop_typec_mode(chg);
+
+	if (typec_mode >= POWER_SUPPLY_TYPEC_SOURCE_DEFAULT
+			|| typec_mode == POWER_SUPPLY_TYPEC_NONE) {
+
+		if (chg->typec_role_swap_failed) {
+			rc = smblib_role_switch_failure(chg);
+			if (rc < 0)
+				smblib_err(chg, "Failed to role switch rc=%d\n",
+					rc);
+			chg->typec_role_swap_failed = false;
+		}
+
+		typec_set_data_role(chg->typec_port, TYPEC_DEVICE);
+		typec_set_pwr_role(chg->typec_port, TYPEC_SINK);
+	} else {
+		typec_set_data_role(chg->typec_port, TYPEC_HOST);
+		typec_set_pwr_role(chg->typec_port, TYPEC_SOURCE);
+	}
+
+unlock:
+	mutex_unlock(&chg->typec_lock);
+	return rc;
+}
+
+static void typec_partner_unregister(struct smb_charger *chg)
+{
+	mutex_lock(&chg->typec_lock);
+
+	if (!chg->typec_port)
+		goto unlock;
+
+	if (chg->typec_partner && !chg->pr_swap_in_progress) {
+		smblib_dbg(chg, PR_MISC, "Un-registering typeC partner\n");
+		typec_unregister_partner(chg->typec_partner);
+		chg->typec_partner = NULL;
+	}
+
+unlock:
+	mutex_unlock(&chg->typec_lock);
+}
+
 static void smblib_micro_usb_plugin(struct smb_charger *chg, bool vbus_rising)
 {
+	int rc = 0;
+
 	if (!vbus_rising) {
 		smblib_update_usb_type(chg);
 		smblib_notify_device_mode(chg, false);
 		smblib_uusb_removal(chg);
+		typec_partner_unregister(chg);
+	} else {
+		rc = typec_partner_register(chg);
+		if (rc < 0)
+			smblib_err(chg, "Couldn't register partner rc =%d\n",
+					rc);
 	}
 }
 
@@ -8299,7 +8466,6 @@ static void smblib_handle_hvdcp_3p0_auth_done(struct smb_charger *chg,
 				msecs_to_jiffies(APSD_EXTENDED_TIMEOUT_MS)
 				+ jiffies);
 		}
-
 	}
 
 	smblib_dbg(chg, PR_INTERRUPT, "IRQ: hvdcp-3p0-auth-done rising; %s detected\n",
@@ -8311,9 +8477,16 @@ static void smblib_handle_hvdcp_3p0_auth_done(struct smb_charger *chg,
 static void smblib_handle_hvdcp_check_timeout(struct smb_charger *chg,
 					      bool rising, bool qc_charger)
 {
+	u32 hvdcp_ua = 0;
+
 	if (rising) {
 
 		if (qc_charger) {
+			hvdcp_ua = (chg->real_charger_type ==
+					POWER_SUPPLY_TYPE_USB_HVDCP) ?
+					chg->chg_param.hvdcp2_max_icl_ua :
+					HVDCP_CURRENT_UA;
+
 			/* enable HDC and ICL irq for QC2/3 charger */
 			vote(chg->limited_irq_disable_votable,
 					CHARGER_TYPE_VOTER, false, 0);
@@ -8719,6 +8892,144 @@ static void typec_ra_ra_insertion(struct smb_charger *chg)
 	smblib_hvdcp_detect_enable(chg, true);
 }
 
+static const char * const dr_mode_text[] = {
+	"ufp", "dfp", "none"
+};
+
+static int smblib_force_dr_mode(struct smb_charger *chg, int mode)
+{
+	int rc = 0;
+
+	switch (mode) {
+	case TYPEC_PORT_SNK:
+		rc = smblib_masked_write(chg, TYPE_C_MODE_CFG_REG,
+			TYPEC_POWER_ROLE_CMD_MASK, EN_SNK_ONLY_BIT);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't enable snk, rc=%d\n", rc);
+			return rc;
+		}
+		break;
+	case TYPEC_PORT_SRC:
+		rc = smblib_masked_write(chg, TYPE_C_MODE_CFG_REG,
+			TYPEC_POWER_ROLE_CMD_MASK, EN_SRC_ONLY_BIT);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't enable src, rc=%d\n", rc);
+			return rc;
+		}
+		break;
+	case TYPEC_PORT_DRP:
+		rc = smblib_masked_write(chg, TYPE_C_MODE_CFG_REG,
+			TYPEC_POWER_ROLE_CMD_MASK, 0);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't enable DRP, rc=%d\n", rc);
+			return rc;
+		}
+		break;
+	default:
+		smblib_err(chg, "Power role %d not supported\n", mode);
+		return -EINVAL;
+	}
+
+	chg->dr_mode = mode;
+
+	return rc;
+}
+
+int smblib_typec_port_type_set(const struct typec_capability *cap,
+					enum typec_port_type type)
+{
+	struct smb_charger *chg = container_of(cap,
+					struct smb_charger, typec_caps);
+	int rc = 0;
+
+	mutex_lock(&chg->typec_lock);
+
+	if ((chg->pr_swap_in_progress) || (type == TYPEC_PORT_DRP)) {
+		smblib_dbg(chg, PR_MISC, "Ignoring port type request type = %d swap_in_progress = %d\n",
+				type, chg->pr_swap_in_progress);
+		goto unlock;
+	}
+
+	chg->pr_swap_in_progress = true;
+
+	rc = smblib_force_dr_mode(chg, type);
+	if (rc < 0) {
+		chg->pr_swap_in_progress = false;
+		smblib_err(chg, "Failed to force mode, rc=%d\n", rc);
+		goto unlock;
+	}
+
+	smblib_dbg(chg, PR_MISC, "Requested role %s\n",
+				type ? "SINK" : "SOURCE");
+
+	/*
+	 * As per the hardware requirements,
+	 * schedule the work with required delay.
+	 */
+	if (!(delayed_work_pending(&chg->role_reversal_check))) {
+		cancel_delayed_work_sync(&chg->role_reversal_check);
+		schedule_delayed_work(&chg->role_reversal_check,
+			msecs_to_jiffies(ROLE_REVERSAL_DELAY_MS));
+		vote(chg->awake_votable, TYPEC_SWAP_VOTER, true, 0);
+	}
+
+unlock:
+	mutex_unlock(&chg->typec_lock);
+	return rc;
+}
+
+static void smblib_typec_role_check_work(struct work_struct *work)
+{
+	struct smb_charger *chg = container_of(work, struct smb_charger,
+					role_reversal_check.work);
+	int rc = 0;
+
+	mutex_lock(&chg->typec_lock);
+
+	switch (chg->dr_mode) {
+	case TYPEC_PORT_SNK:
+		if (chg->typec_mode < POWER_SUPPLY_TYPEC_SOURCE_DEFAULT) {
+			smblib_dbg(chg, PR_MISC, "Role reversal not latched to UFP in %d msecs. Resetting to DRP mode\n",
+						ROLE_REVERSAL_DELAY_MS);
+			rc = smblib_force_dr_mode(chg, TYPEC_PORT_DRP);
+			if (rc < 0)
+				smblib_err(chg, "Failed to set DRP mode, rc=%d\n",
+						rc);
+		} else {
+			chg->power_role = POWER_SUPPLY_TYPEC_PR_SINK;
+			typec_set_pwr_role(chg->typec_port, TYPEC_SINK);
+			typec_set_data_role(chg->typec_port, TYPEC_DEVICE);
+			smblib_dbg(chg, PR_MISC, "Role changed successfully to SINK");
+		}
+		break;
+	case TYPEC_PORT_SRC:
+		if (chg->typec_mode >= POWER_SUPPLY_TYPEC_SOURCE_DEFAULT
+			|| chg->typec_mode == POWER_SUPPLY_TYPEC_NONE) {
+			smblib_dbg(chg, PR_MISC, "Role reversal not latched to DFP in %d msecs. Resetting to DRP mode\n",
+						ROLE_REVERSAL_DELAY_MS);
+			chg->pr_swap_in_progress = false;
+			chg->typec_role_swap_failed = true;
+			rc = smblib_force_dr_mode(chg, TYPEC_PORT_DRP);
+			if (rc < 0)
+				smblib_err(chg, "Failed to set DRP mode, rc=%d\n",
+					rc);
+		} else {
+			chg->power_role = POWER_SUPPLY_TYPEC_PR_SOURCE;
+			typec_set_pwr_role(chg->typec_port, TYPEC_SOURCE);
+			typec_set_data_role(chg->typec_port, TYPEC_HOST);
+			smblib_dbg(chg, PR_MISC, "Role changed successfully to SOURCE");
+		}
+		break;
+	default:
+		pr_debug("Already in DRP mode\n");
+		break;
+	}
+
+	chg->pr_swap_in_progress = false;
+	vote(chg->awake_votable, TYPEC_SWAP_VOTER, false, 0);
+	mutex_unlock(&chg->typec_lock);
+}
+
 static void typec_sink_removal(struct smb_charger *chg)
 {
 	int rc;
@@ -8742,8 +9053,9 @@ static void typec_src_removal(struct smb_charger *chg)
 	struct smb_irq_data *data;
 	struct storm_watch *wdata;
 	int sec_charger;
+	u8 val[2] = {0};
 
-	CHG_DBG("start\n");
+    CHG_DBG("start\n");
 
 	sec_charger = chg->sec_pl_present ? POWER_SUPPLY_CHARGER_SEC_PL :
 				POWER_SUPPLY_CHARGER_SEC_NONE;
@@ -8833,6 +9145,18 @@ static void typec_src_removal(struct smb_charger *chg)
 	if (rc < 0)
 		smblib_err(chg, "Couldn't write float charger options rc=%d\n",
 			rc);
+
+	if (chg->sdam_base) {
+		rc = smblib_write(chg,
+			chg->sdam_base + SDAM_QC_DET_STATUS_REG, 0);
+		if (rc < 0)
+			pr_err("Couldn't clear SDAM QC status rc=%d\n", rc);
+
+		rc = smblib_batch_write(chg,
+			chg->sdam_base + SDAM_QC_ADC_LSB_REG, val, 2);
+		if (rc < 0)
+			pr_err("Couldn't clear SDAM ADC status rc=%d\n", rc);
+	}
 
 	if (!chg->pr_swap_in_progress) {
 		rc = smblib_usb_pd_adapter_allowance_override(chg, FORCE_NULL);
@@ -9017,6 +9341,7 @@ static void smblib_lpd_clear_ra_open_work(struct smb_charger *chg)
 	vote(chg->awake_votable, LPD_VOTER, false, 0);
 }
 
+#define TYPEC_DETACH_DETECT_DELAY_MS 2000
 irqreturn_t typec_attach_detach_irq_handler(int irq, void *data)
 {
 	struct smb_irq_data *irq_data = data;
@@ -9025,7 +9350,7 @@ irqreturn_t typec_attach_detach_irq_handler(int irq, void *data)
 	bool attached = false;
 	int rc;
 
-	CHG_DBG("IRQ: %s\n", irq_data->name);
+    CHG_DBG("IRQ: %s\n", irq_data->name);
 	smblib_dbg(chg, PR_INTERRUPT, "IRQ: %s\n", irq_data->name);
 
 	rc = smblib_read(chg, TYPE_C_STATE_MACHINE_STATUS_REG, &stat);
@@ -9038,7 +9363,7 @@ irqreturn_t typec_attach_detach_irq_handler(int irq, void *data)
 	attached = !!(stat & TYPEC_ATTACH_DETACH_STATE_BIT);
 
 	if (attached) {
-		CHG_DBG("attach\n");
+        CHG_DBG("attach\n");
 		smblib_lpd_clear_ra_open_work(chg);
 
 		rc = smblib_read(chg, TYPE_C_MISC_STATUS_REG, &stat);
@@ -9063,8 +9388,12 @@ irqreturn_t typec_attach_detach_irq_handler(int irq, void *data)
 			typec_src_insertion(chg);
 		}
 
+		rc = typec_partner_register(chg);
+		if (rc < 0)
+			smblib_err(chg, "failed to register partner rc =%d\n",
+					rc);
 	} else {
-		CHG_DBG("detach\n");
+        CHG_DBG("detach\n");
 		switch (chg->sink_src_mode) {
 		case SRC_MODE:
 			typec_sink_removal(chg);
@@ -9088,6 +9417,35 @@ irqreturn_t typec_attach_detach_irq_handler(int irq, void *data)
 			chg->early_usb_attach = false;
 			smblib_apsd_enable(chg, true);
 		}
+
+		/*
+		 * Restore DRP mode on type-C cable disconnect if role
+		 * swap is not in progress, to ensure forced sink or src
+		 * mode configuration is reset properly.
+		 */
+		mutex_lock(&chg->typec_lock);
+
+		if (chg->typec_port && !chg->pr_swap_in_progress) {
+
+			/*
+			 * Schedule the work to differentiate actual removal
+			 * of cable and detach interrupt during role swap,
+			 * unregister the partner only during actual cable
+			 * removal.
+			 */
+			cancel_delayed_work(&chg->pr_swap_detach_work);
+			vote(chg->awake_votable, DETACH_DETECT_VOTER, true, 0);
+			schedule_delayed_work(&chg->pr_swap_detach_work,
+				msecs_to_jiffies(TYPEC_DETACH_DETECT_DELAY_MS));
+			smblib_force_dr_mode(chg, TYPEC_PORT_DRP);
+			/*
+			 * To handle cable removal during role
+			 * swap failure.
+			 */
+			chg->typec_role_swap_failed = false;
+		}
+
+		mutex_unlock(&chg->typec_lock);
 
 		if (chg->lpd_stage == LPD_STAGE_FLOAT_CANCEL)
 			schedule_delayed_work(&chg->lpd_detach_work,
@@ -9711,6 +10069,9 @@ static void smblib_pr_swap_detach_work(struct work_struct *work)
 		rc = smblib_request_dpdm(chg, false);
 		if (rc < 0)
 			smblib_err(chg, "Couldn't disable DPDM rc=%d\n", rc);
+
+		if (chg->typec_port)
+			typec_partner_unregister(chg);
 	}
 out:
 	vote(chg->awake_votable, DETACH_DETECT_VOTER, false, 0);
@@ -10090,11 +10451,6 @@ static enum alarmtimer_restart chg_termination_alarm_cb(struct alarm *alarm,
 	return ALARMTIMER_NORESTART;
 }
 
-extern enum DEVICE_HWID g_ASUS_hwID;
-#define BATT_TYPE_ARA "3282423_asus_c11p1708_3150mah_averaged_masterslave_jul10th2018"
-#define QCOM3600 "alium_860_89032_0000_3600mah_sept24th2018"
-#define BATT_TYPE_KIRIN  "3742266_asus_c11p1806_4850mah_averaged_masterslave_dec13th2018"
-
 static void apsd_timer_cb(struct timer_list *tm)
 {
 	struct smb_charger *chg = container_of(tm, struct smb_charger,
@@ -10106,8 +10462,11 @@ static void apsd_timer_cb(struct timer_list *tm)
 	chg->apsd_ext_timeout = true;
 }
 
+extern enum DEVICE_HWID g_ASUS_hwID;
+#define BATT_TYPE_ARA "3282423_asus_c11p1708_3150mah_averaged_masterslave_jul10th2018"
+#define QCOM3600 "alium_860_89032_0000_3600mah_sept24th2018"
+#define BATT_TYPE_KIRIN  "3742266_asus_c11p1806_4850mah_averaged_masterslave_dec13th2018"
 #define SOFT_JEITA_HYSTERESIS_OFFSET	0x200
-
 static void jeita_update_work(struct work_struct *work)
 {
 	struct smb_charger *chg = container_of(work, struct smb_charger,
@@ -10375,193 +10734,6 @@ static void smblib_lpd_detach_work(struct work_struct *work)
 		chg->lpd_stage = LPD_STAGE_NONE;
 }
 
-//[+++]ASUS : Add usb water alert feature
-void asus_usb_water_work(struct work_struct *work)
-{
-	struct smb_charger *chg = container_of(work, struct smb_charger,
-							asus_usb_water_work.work);
-	CHG_DBG("[usb_water] 10s after water is detected, reset vbus_liquid = 0\n");
-	asus_extcon_set_state_sync(chg->water_extcon, 0);
-}
-//[---]ASUS : Add usb water alert feature
-
-//[+++]ASUS : Add usb thermal alert feature
-void asus_usb_thermal_work(struct work_struct *work)
-{
-	struct smb_charger *chg = container_of(work, struct smb_charger,
-							asus_usb_thermal_work.work);
-	int rc;
-	u8 reg;
-	int conn_temp, usb_present, otg_present;
-
-	if (!g_usb_thermal_enable || no_input_suspend_flag)
-		return;
-
-	if (chg->iio.connector_temp_chan) {
-		rc = iio_read_channel_processed(chg->iio.connector_temp_chan,
-				&conn_temp);
-		if (rc < 0) {
-			pr_err("Error in reading connector_temp channel, rc=%d", rc);
-
-			//retry if read fail
-			rc = iio_read_channel_processed(chg->iio.connector_temp_chan,
-				&conn_temp);
-			if (rc < 0) {
-				pr_err("Error in reading connector_temp channel retry, rc=%d", rc);
-				return;
-			}
-			
-		}
-		conn_temp = conn_temp / 100;
-	}
-	if (g_usb_thermal_debug)
-		conn_temp = g_usb_thermal_debug;
-
-	rc = smblib_read(smbchg_dev, TYPE_C_MISC_STATUS_REG, &reg);
-	if (rc < 0)
-		CHG_DBG_E("Couldn't read TYPE_C_MISC_STATUS_REG rc=%d\n", rc);
-	usb_present = reg & CC_ATTACHED_BIT;
-
-	rc = smblib_read(smbchg_dev, DCDC_CMD_OTG_REG, &reg);
-	if (rc < 0)
-		CHG_DBG_E("Couldn't read DCDC_CMD_OTG_REG rc=%d\n", rc);
-	otg_present = reg & OTG_EN_BIT;
-
-	if (!usb_thermal_once_flag && conn_temp >= 700) {
-		if (usb_present) {
-			if (!otg_present) {
-				//#1: 0x1340[0] = 1, Charger input suspend
-				smblib_set_usb_suspend(smbchg_dev, 1);
-			} else {
-				//#1: Delay 100ms
-				msleep(100);
-			}
-			//#2: 0x1140[0] = 0, Disable OTG
-			rc = smblib_masked_write(smbchg_dev, DCDC_CMD_OTG_REG, OTG_EN_BIT, 0);
-			if (rc < 0)
-				CHG_DBG_E("Couldn't set DCDC_CMD_OTG_REG rc=%d\n", rc);
-
-			asus_extcon_set_state_sync(chg->thermal_extcon, THERMAL_ALERT_WITH_AC);
-		} else {
-			asus_extcon_set_state_sync(chg->thermal_extcon, THERMAL_ALERT_NO_AC);
-		}
-		usb_thermal_once_flag = true;
-
-		CHG_DBG("conn_temp(%d) >= 700, usb thermal alert\n", conn_temp);
-	}
-	else if (!usb_present && conn_temp <= 600) {
-		smblib_set_usb_suspend(smbchg_dev, 0);
-		usb_thermal_once_flag = 0;
-		
-		asus_extcon_set_state_sync(chg->thermal_extcon, THERMAL_ALERT_NONE);
-		CHG_DBG("conn_temp(%d) <= 600, disable usb suspend\n", conn_temp);
-	}
-	
-	CHG_DBG("conn_temp(%d), usb(%d), otg(%d), usb_connector = %d\n",
-			conn_temp, usb_present, otg_present, asus_extcon_get_state(smbchg_dev->thermal_extcon));
-
-	schedule_delayed_work(&smbchg_dev->asus_usb_thermal_work, msecs_to_jiffies(THERMAL_ALERT_CYCLE));
-}
-//[---]ASUS : Add usb thermal alert feature
-
-//[+++]ASUS : Show "+" on charging icon
-#define SWITCH_QC_NOT_QUICK_CHARGING_30W    6
-#define SWITCH_QC_QUICK_CHARGING_30W        5
-#define SWITCH_QC_NOT_QUICK_CHARGING        4
-#define SWITCH_QC_QUICK_CHARGING            3
-#define SWITCH_QC_NOT_QUICK_CHARGING_PLUS   2
-#define SWITCH_QC_QUICK_CHARGING_PLUS       1
-#define SWITCH_QC_OTHER                     0
-static int pre_set = -1;
-void set_qc_stat(union power_supply_propval *val)
-{
-	int bat_status;
-	int qc_status;
-	int set = SWITCH_QC_OTHER;
-	int rc = 0;
-	union power_supply_propval pval = {0, };
-
-	if (g_Charger_mode)
-		return;
-
-	rc = power_supply_get_property(smbchg_dev->cp_psy, POWER_SUPPLY_PROP_CP_ENABLE,
-				&pval);
-
-	if (rc < 0) {
-		CHG_DBG_E("Couldn't get CP ENABLE rc=%d\n", rc);
-	}
-
-	if(smbchg_dev->pd_active){
-		if(asus_vid == USB_VID_ASUS){
-			if (pval.intval == 1)
-				set = SWITCH_QC_QUICK_CHARGING_30W;
-			else
-				set = SWITCH_QC_NOT_QUICK_CHARGING_30W;
-		}
-		else if(final_pd_mw > 10000000){
-			if (asus_get_prop_batt_capacity(smbchg_dev) <= 70)
-				set = SWITCH_QC_QUICK_CHARGING_PLUS;
-			else
-				set = SWITCH_QC_NOT_QUICK_CHARGING_PLUS;
-		}
-		else if(final_pd_mw == 10000000){
-			if (asus_get_prop_batt_capacity(smbchg_dev) <= 70)
-				set = SWITCH_QC_QUICK_CHARGING;
-			else
-				set = SWITCH_QC_NOT_QUICK_CHARGING;
-		}
-		else
-			set = SWITCH_QC_OTHER;
-			
-		asus_extcon_set_state_sync(smbchg_dev->quickchg_extcon, set);
-		return;
-	}
-
-	bat_status = val->intval;
-	qc_status = asus_get_batt_status();
-
-	if (qc_status == NORMAL) {
-		set = SWITCH_QC_OTHER;
-		asus_extcon_set_state_sync(smbchg_dev->quickchg_extcon, set);
-
-		if (pre_set != set) {
-			CHG_DBG("Batt_status = %s, quick_charging = %d\n", bat_status_text[bat_status], set);
-			pre_set = set;
-		}
-		return;
-	}
-
-	switch (bat_status) {
-	//QUICK_CHARGING and QUICK_CHARGING_PLUS happen in charger mode only, refer to smblib_get_prop_batt_status
-	case POWER_SUPPLY_STATUS_CHARGING:
-	case POWER_SUPPLY_STATUS_NOT_CHARGING:
-		if (asus_get_prop_batt_capacity(smbchg_dev) <= 70) {
-			if (qc_status == QC)
-				set = SWITCH_QC_QUICK_CHARGING;
-			else if (qc_status == QC_PLUS)
-				set = SWITCH_QC_QUICK_CHARGING_PLUS;
-		} else {
-			if (qc_status == QC)
-				set = SWITCH_QC_NOT_QUICK_CHARGING;
-			else if (qc_status == QC_PLUS)
-				set = SWITCH_QC_NOT_QUICK_CHARGING_PLUS;
-		}
-		asus_extcon_set_state_sync(smbchg_dev->quickchg_extcon, set);
-		break;
-	default:
-		set = SWITCH_QC_OTHER;
-		asus_extcon_set_state_sync(smbchg_dev->quickchg_extcon, set);
-		break;
-	}
-
-	if (pre_set != set) {
-		CHG_DBG("Batt_status = %s, quick_charging = %d\n", bat_status_text[bat_status], set);
-		pre_set = set;
-	}
-	return;
-}
-//[---]ASUS : Show "+" on charging icon
-
 void asus_charger_set_smb1390_min_ilim_ua(u32 min_ilim_ua);
 
 static void asus_hvdcp3_18W_workaround_work(struct work_struct *work)
@@ -10635,9 +10807,11 @@ static void asus_hvdcp3_18W_workaround_work(struct work_struct *work)
 	}
 	cancel_delayed_work_sync(&chg->asus_panel_check_work);
 	schedule_delayed_work(&chg->asus_panel_check_work, msecs_to_jiffies(0));
+	asus_increase_vbus_in_process = false;
 
 	return;
 finish:
+		asus_increase_vbus_in_process = false;
 		pr_info(" hvdcp3_18W_workaround abort panel check");
 }
 
@@ -10660,6 +10834,8 @@ static void asus_hvdcp3_setting_work(struct work_struct *work)
 
 	if (apsd_result_status==0x48)
 	{
+		pr_info(" start  asus_increase_vbus_in_process  ++++ \n");
+		asus_increase_vbus_in_process = true;
 		asus_disable_smb1390(true);
 		smblib_write(chg, USBIN_OPTIONS_1_CFG_REG, 0x1E);//0x1362=1E
 		
@@ -10676,9 +10852,10 @@ static void asus_hvdcp3_setting_work(struct work_struct *work)
 			smblib_write(chg, 0x1343, 0x01);//0x1343=0x01
 			if(i < 20)
 			{
-				mdelay(1000);
+				msleep(1000);
 			}
 		}
+
 		pr_info(" asus_hvdcp3_setting_work check vbus =%d ",voltage_val.intval);
 		if(smartchg_slow_flag)
 		{
@@ -10937,6 +11114,193 @@ relax:
 	pm_relax(chg->dev);
 }
 
+//[+++]ASUS : Add usb water alert feature
+void asus_usb_water_work(struct work_struct *work)
+{
+	struct smb_charger *chg = container_of(work, struct smb_charger,
+							asus_usb_water_work.work);
+	CHG_DBG("[usb_water] 10s after water is detected, reset vbus_liquid = 0\n");
+	asus_extcon_set_state_sync(chg->water_extcon, 0);
+}
+//[---]ASUS : Add usb water alert feature
+
+//[+++]ASUS : Add usb thermal alert feature
+void asus_usb_thermal_work(struct work_struct *work)
+{
+	struct smb_charger *chg = container_of(work, struct smb_charger,
+							asus_usb_thermal_work.work);
+	int rc;
+	u8 reg;
+	int conn_temp, usb_present, otg_present;
+
+	if (!g_usb_thermal_enable || no_input_suspend_flag)
+		return;
+
+	if (chg->iio.connector_temp_chan) {
+		rc = iio_read_channel_processed(chg->iio.connector_temp_chan,
+				&conn_temp);
+		if (rc < 0) {
+			pr_err("Error in reading connector_temp channel, rc=%d", rc);
+
+			//retry if read fail
+			rc = iio_read_channel_processed(chg->iio.connector_temp_chan,
+				&conn_temp);
+			if (rc < 0) {
+				pr_err("Error in reading connector_temp channel retry, rc=%d", rc);
+				return;
+			}
+			
+		}
+		conn_temp = conn_temp / 100;
+	}
+	if (g_usb_thermal_debug)
+		conn_temp = g_usb_thermal_debug;
+
+	rc = smblib_read(smbchg_dev, TYPE_C_MISC_STATUS_REG, &reg);
+	if (rc < 0)
+		CHG_DBG_E("Couldn't read TYPE_C_MISC_STATUS_REG rc=%d\n", rc);
+	usb_present = reg & CC_ATTACHED_BIT;
+
+	rc = smblib_read(smbchg_dev, DCDC_CMD_OTG_REG, &reg);
+	if (rc < 0)
+		CHG_DBG_E("Couldn't read DCDC_CMD_OTG_REG rc=%d\n", rc);
+	otg_present = reg & OTG_EN_BIT;
+
+	if (!usb_thermal_once_flag && conn_temp >= 700) {
+		if (usb_present) {
+			if (!otg_present) {
+				//#1: 0x1340[0] = 1, Charger input suspend
+				smblib_set_usb_suspend(smbchg_dev, 1);
+			} else {
+				//#1: Delay 100ms
+				msleep(100);
+			}
+			//#2: 0x1140[0] = 0, Disable OTG
+			rc = smblib_masked_write(smbchg_dev, DCDC_CMD_OTG_REG, OTG_EN_BIT, 0);
+			if (rc < 0)
+				CHG_DBG_E("Couldn't set DCDC_CMD_OTG_REG rc=%d\n", rc);
+
+			asus_extcon_set_state_sync(chg->thermal_extcon, THERMAL_ALERT_WITH_AC);
+		} else {
+			asus_extcon_set_state_sync(chg->thermal_extcon, THERMAL_ALERT_NO_AC);
+		}
+		usb_thermal_once_flag = true;
+
+		CHG_DBG("conn_temp(%d) >= 700, usb thermal alert\n", conn_temp);
+	}
+	else if (!usb_present && conn_temp <= 600) {
+		smblib_set_usb_suspend(smbchg_dev, 0);
+		usb_thermal_once_flag = 0;
+		
+		asus_extcon_set_state_sync(chg->thermal_extcon, THERMAL_ALERT_NONE);
+		CHG_DBG("conn_temp(%d) <= 600, disable usb suspend\n", conn_temp);
+	}
+	
+	CHG_DBG("conn_temp(%d), usb(%d), otg(%d), usb_connector = %d\n",
+			conn_temp, usb_present, otg_present, asus_extcon_get_state(smbchg_dev->thermal_extcon));
+
+	schedule_delayed_work(&smbchg_dev->asus_usb_thermal_work, msecs_to_jiffies(THERMAL_ALERT_CYCLE));
+}
+//[---]ASUS : Add usb thermal alert feature
+
+//[+++]ASUS : Show "+" on charging icon
+#define SWITCH_QC_NOT_QUICK_CHARGING_30W    6
+#define SWITCH_QC_QUICK_CHARGING_30W        5
+#define SWITCH_QC_NOT_QUICK_CHARGING        4
+#define SWITCH_QC_QUICK_CHARGING            3
+#define SWITCH_QC_NOT_QUICK_CHARGING_PLUS   2
+#define SWITCH_QC_QUICK_CHARGING_PLUS       1
+#define SWITCH_QC_OTHER                     0
+static int pre_set = -1;
+void set_qc_stat(union power_supply_propval *val)
+{
+	int bat_status;
+	int qc_status;
+	int set = SWITCH_QC_OTHER;
+	int rc = 0;
+	union power_supply_propval pval = {0, };
+
+	if (g_Charger_mode)
+		return;
+
+	rc = power_supply_get_property(smbchg_dev->cp_psy, POWER_SUPPLY_PROP_CP_ENABLE,
+				&pval);
+
+	if (rc < 0) {
+		CHG_DBG_E("Couldn't get CP ENABLE rc=%d\n", rc);
+	}
+
+	if(smbchg_dev->pd_active){
+		if(asus_vid == USB_VID_ASUS){
+			if (pval.intval == 1)
+				set = SWITCH_QC_QUICK_CHARGING_30W;
+			else
+				set = SWITCH_QC_NOT_QUICK_CHARGING_30W;
+		}
+		else if(final_pd_mw > 10000000){
+			if (asus_get_prop_batt_capacity(smbchg_dev) <= 70)
+				set = SWITCH_QC_QUICK_CHARGING_PLUS;
+			else
+				set = SWITCH_QC_NOT_QUICK_CHARGING_PLUS;
+		}
+		else if(final_pd_mw == 10000000){
+			if (asus_get_prop_batt_capacity(smbchg_dev) <= 70)
+				set = SWITCH_QC_QUICK_CHARGING;
+			else
+				set = SWITCH_QC_NOT_QUICK_CHARGING;
+		}
+		else
+			set = SWITCH_QC_OTHER;
+			
+		asus_extcon_set_state_sync(smbchg_dev->quickchg_extcon, set);
+		return;
+	}
+
+	bat_status = val->intval;
+	qc_status = asus_get_batt_status();
+
+	if (qc_status == NORMAL) {
+		set = SWITCH_QC_OTHER;
+		asus_extcon_set_state_sync(smbchg_dev->quickchg_extcon, set);
+
+		if (pre_set != set) {
+			CHG_DBG("Batt_status = %s, quick_charging = %d\n", bat_status_text[bat_status], set);
+			pre_set = set;
+		}
+		return;
+	}
+
+	switch (bat_status) {
+	//QUICK_CHARGING and QUICK_CHARGING_PLUS happen in charger mode only, refer to smblib_get_prop_batt_status
+	case POWER_SUPPLY_STATUS_CHARGING:
+	case POWER_SUPPLY_STATUS_NOT_CHARGING:
+		if (asus_get_prop_batt_capacity(smbchg_dev) <= 70) {
+			if (qc_status == QC)
+				set = SWITCH_QC_QUICK_CHARGING;
+			else if (qc_status == QC_PLUS)
+				set = SWITCH_QC_QUICK_CHARGING_PLUS;
+		} else {
+			if (qc_status == QC)
+				set = SWITCH_QC_NOT_QUICK_CHARGING;
+			else if (qc_status == QC_PLUS)
+				set = SWITCH_QC_NOT_QUICK_CHARGING_PLUS;
+		}
+		asus_extcon_set_state_sync(smbchg_dev->quickchg_extcon, set);
+		break;
+	default:
+		set = SWITCH_QC_OTHER;
+		asus_extcon_set_state_sync(smbchg_dev->quickchg_extcon, set);
+		break;
+	}
+
+	if (pre_set != set) {
+		CHG_DBG("Batt_status = %s, quick_charging = %d\n", bat_status_text[bat_status], set);
+		pre_set = set;
+	}
+	return;
+}
+//[---]ASUS : Show "+" on charging icon
+
 static int smblib_create_votables(struct smb_charger *chg)
 {
 	int rc = 0;
@@ -11156,6 +11520,9 @@ int smblib_init(struct smb_charger *chg)
 					smblib_pr_lock_clear_work);
 	timer_setup(&chg->apsd_timer, apsd_timer_cb, 0);
 
+	INIT_DELAYED_WORK(&chg->role_reversal_check,
+					smblib_typec_role_check_work);
+
 	if (chg->wa_flags & CHG_TERMINATION_WA) {
 		INIT_WORK(&chg->chg_termination_work,
 					smblib_chg_termination_work);
@@ -11200,6 +11567,7 @@ int smblib_init(struct smb_charger *chg)
 	chg->thermal_status = TEMP_BELOW_RANGE;
 	chg->typec_irq_en = true;
 	chg->cp_topo = -EINVAL;
+	chg->dr_mode = TYPEC_PORT_DRP;
 
 //[+++]ASUS extcon registration
 	chg->thermal_extcon = extcon_dev_allocate(asus_extcon_cable);
@@ -11374,6 +11742,7 @@ int smblib_deinit(struct smb_charger *chg)
 		cancel_delayed_work_sync(&chg->lpd_detach_work);
 		cancel_delayed_work_sync(&chg->thermal_regulation_work);
 		cancel_delayed_work_sync(&chg->usbov_dbc_work);
+		cancel_delayed_work_sync(&chg->role_reversal_check);
 		cancel_delayed_work_sync(&chg->pr_swap_detach_work);
 		power_supply_unreg_notifier(&chg->nb);
 		smblib_destroy_votables(chg);

@@ -59,7 +59,7 @@ static struct workqueue_struct 		*ALSPS_workqueue;
 static struct workqueue_struct 		*ALSPS_delay_workqueue;
 static struct mutex 				g_alsps_lock;
 static struct mutex 				g_i2c_lock;
-static struct wake_lock 			g_alsps_wake_lock;
+static struct wakeup_source 			*g_alsps_wake_lock;
 static struct hrtimer 			g_alsps_timer;
 static struct i2c_client *g_i2c_client;
 static int g_als_last_lux = 0;
@@ -2125,7 +2125,7 @@ mutex_lock(&g_alsps_lock);
 	}
 	dbg("ALSPS ist --- \n");
 ist_err:	
-	wake_unlock(&g_alsps_wake_lock);
+	__pm_relax(g_alsps_wake_lock);
 	dbg("[IRQ] Enable irq !! \n");
 	enable_irq(ALSPS_SENSOR_IRQ);	
 mutex_unlock(&g_alsps_lock);
@@ -2144,7 +2144,7 @@ static void ALSPS_irq_handler(void)
 
 	/*Queue work will enbale IRQ and unlock wake_lock*/
 	queue_work(ALSPS_workqueue, &ALSPS_ist_work);
-	wake_lock(&g_alsps_wake_lock);
+	__pm_stay_awake(g_alsps_wake_lock);
 	return;
 irq_err:
 	dbg("[IRQ] Enable irq !! \n");
@@ -2175,7 +2175,7 @@ static int check_ALSP_onoff(void){
 static int ALS_check_event_rest_time(int lux){
 	struct timespec ts;
 	u64 l_current_time_ns;
-	get_monotonic_boottime(&ts);
+	getnstimeofday(&ts);
 	l_current_time_ns = timespec_to_ns(&ts);
 	if(g_als_data->evt_skip_time_ns != 0){
 		if(l_current_time_ns > g_als_data->evt_skip_time_ns){
@@ -2220,7 +2220,7 @@ static int ALS_dynamic_ctl_check(int lux){
 		ALSPS_hw_client->mlsensor_hw->light_hw_set_integration(g_als_data->dynamic_IT);
 		
 		//assign rest time enable
-	    get_monotonic_boottime(&g_als_data->ts); 
+		getnstimeofday(&g_als_data->ts);
 		g_als_data->evt_skip_time_ns = timespec_to_ns(&g_als_data->ts) + ALSPS_hw_client->mlsensor_hw->light_hw_get_evt_skip_time_ns();
 		return 1;
 	}else
@@ -2238,7 +2238,7 @@ bool proximityStatus(void)
 	int ret=0;
 	int threshold_high = 0;
 
-wake_lock(&g_alsps_wake_lock);	
+	__pm_stay_awake(g_alsps_wake_lock);
 	/* check probe status */
 	if(ALSPS_hw_client == NULL)
 		goto ERROR_HANDLE;
@@ -2291,7 +2291,7 @@ wake_lock(&g_alsps_wake_lock);
 ERROR_HANDLE:
 	
 	mutex_unlock(&g_alsps_lock);
-wake_unlock(&g_alsps_wake_lock);
+	__pm_relax(g_alsps_wake_lock);
 	return status;
 }
 EXPORT_SYMBOL(proximityStatus);
@@ -2865,7 +2865,7 @@ static int __init ALSPS_init(void)
 	mutex_init(&g_i2c_lock);
 
 	/* Initialize the wake lock */
-	wake_lock_init(&g_alsps_wake_lock, WAKE_LOCK_SUSPEND, "ALSPS_wake_lock");
+	g_alsps_wake_lock = wakeup_source_register(NULL, "ALSPS_wake_lock");
 
 	/*Initialize high resolution timer*/
 	hrtimer_init(&g_alsps_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -2952,7 +2952,7 @@ static void __exit ALSPS_exit(void)
 	psensor_ATTR_unregister();
 	lsensor_ATTR_unregister();
 	
-	wake_lock_destroy(&g_alsps_wake_lock);
+	wakeup_source_unregister(g_alsps_wake_lock);
 	mutex_destroy(&g_alsps_lock);
 	mutex_destroy(&g_i2c_lock);
 	kfree(g_ps_data);

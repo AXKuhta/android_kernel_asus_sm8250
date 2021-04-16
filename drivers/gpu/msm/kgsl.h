@@ -120,6 +120,7 @@ struct kgsl_context;
  * @full_cache_threshold: the threshold that triggers a full cache flush
  * @workqueue: Pointer to a single threaded workqueue
  * @mem_workqueue: Pointer to a workqueue for deferring memory entries
+ * @mem_work: Work struct to schedule mem_workqueue flush
  */
 struct kgsl_driver {
 	struct cdev cdev;
@@ -150,6 +151,7 @@ struct kgsl_driver {
 	unsigned int full_cache_threshold;
 	struct workqueue_struct *workqueue;
 	struct workqueue_struct *mem_workqueue;
+	struct work_struct mem_work;
 	struct kthread_worker worker;
 	struct task_struct *worker_thread;
 };
@@ -189,6 +191,12 @@ struct kgsl_memdesc_ops {
 #define KGSL_MEMDESC_UCODE BIT(9)
 /* For global buffers, randomly assign an address from the region */
 #define KGSL_MEMDESC_RANDOM BIT(10)
+/* The memdesc pages can be reclaimed */
+#define KGSL_MEMDESC_CAN_RECLAIM BIT(11)
+/* The memdesc pages were reclaimed */
+#define KGSL_MEMDESC_RECLAIMED BIT(12)
+/* Skip reclaim of the memdesc pages */
+#define KGSL_MEMDESC_SKIP_RECLAIM BIT(13)
 
 /**
  * struct kgsl_memdesc - GPU memory object descriptor
@@ -209,6 +217,7 @@ struct kgsl_memdesc_ops {
  * @pages: An array of pointers to allocated pages
  * @page_count: Total number of pages allocated
  * @cur_bindings: Number of sparse pages actively bound
+ * @shmem_filp: Pointer to the shmem file backing this memdesc
  */
 struct kgsl_memdesc {
 	struct kgsl_pagetable *pagetable;
@@ -228,6 +237,19 @@ struct kgsl_memdesc {
 	struct page **pages;
 	unsigned int page_count;
 	unsigned int cur_bindings;
+	struct file *shmem_filp;
+	/**
+	 * @vma: Pointer to the vm_area_struct this memdesc is mapped to
+	 */
+	struct vm_area_struct *vma;
+	/**
+	 * @lock: Spinlock to protect the pages array
+	 */
+	spinlock_t lock;
+	/**
+	 * @reclaimed_page_count: Total number of pages reclaimed
+	 */
+	int reclaimed_page_count;
 };
 
 /*
@@ -425,6 +447,7 @@ long kgsl_ioctl_gpu_sparse_command(struct kgsl_device_private *dev_priv,
 					unsigned int cmd, void *data);
 
 void kgsl_mem_entry_destroy(struct kref *kref);
+void kgsl_mem_entry_destroy_deferred(struct kref *kref);
 
 void kgsl_get_egl_counts(struct kgsl_mem_entry *entry,
 			int *egl_surface_count, int *egl_image_count);
@@ -540,6 +563,21 @@ kgsl_mem_entry_put(struct kgsl_mem_entry *entry)
 {
 	if (entry)
 		kref_put(&entry->refcount, kgsl_mem_entry_destroy);
+}
+
+/**
+ * kgsl_mem_entry_put_deferred - Puts refcount and triggers deferred
+ *  mem_entry destroy when refcount goes to zero.
+ * @entry: memory entry to be put.
+ *
+ * Use this to put a memory entry when we don't want to block
+ * the caller while destroying memory entry.
+ */
+static inline void
+kgsl_mem_entry_put_deferred(struct kgsl_mem_entry *entry)
+{
+	if (entry)
+		kref_put(&entry->refcount, kgsl_mem_entry_destroy_deferred);
 }
 
 /*

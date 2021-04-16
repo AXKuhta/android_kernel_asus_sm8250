@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  */
 
 #define pr_fmt(fmt) "%s:%s " fmt, KBUILD_MODNAME, __func__
@@ -35,9 +35,16 @@
 #include <trace/events/lmh.h>
 
 #define LIMITS_DCVSH			0x10
+#define LIMITS_PROFILE_CHANGE		0x01
 #define LIMITS_NODE_DCVS		0x44435653
 
 #define LIMITS_SUB_FN_THERMAL		0x54484D4C
+#define LIMITS_SUB_FN_CRNT		0x43524E54
+#define LIMITS_SUB_FN_REL		0x52454C00
+#define LIMITS_SUB_FN_BCL		0x42434C00
+
+#define LIMITS_ALGO_MODE_ENABLE		0x454E424C
+
 #define LIMITS_HI_THRESHOLD		0x48494748
 #define LIMITS_LOW_THRESHOLD		0x4C4F5700
 #define LIMITS_ARM_THRESHOLD		0x41524D00
@@ -336,9 +343,24 @@ static struct limits_dcvs_hw *get_dcvsh_hw_from_cpu(int cpu)
 
 	return NULL;
 }
-#ifdef ASUS_ZS661KS_PROJECT
-u32 therm_cpu7_max_limit = 2841600;
-#endif
+
+static int enable_lmh(void)
+{
+	int ret = 0;
+	struct scm_desc desc_arg;
+
+	desc_arg.args[0] = 1;
+	desc_arg.arginfo = SCM_ARGS(1, SCM_VAL);
+	ret = scm_call2(SCM_SIP_FNID(SCM_SVC_LMH, LIMITS_PROFILE_CHANGE),
+			&desc_arg);
+	if (ret) {
+		pr_err("Error switching profile:[1]. err:%d\n", ret);
+		return ret;
+	}
+
+	return ret;
+}
+
 static int lmh_set_max_limit(int cpu, u32 freq)
 {
 	struct limits_dcvs_hw *hw = get_dcvsh_hw_from_cpu(cpu);
@@ -350,7 +372,7 @@ static int lmh_set_max_limit(int cpu, u32 freq)
 
 	mutex_lock(&hw->access_lock);
 	for_each_cpu(cpu_idx, &hw->core_map) {
-		if (cpu_idx == cpu){
+		if (cpu_idx == cpu)
 		/*
 		 * If there is no limits restriction for CPU scaling max
 		 * frequency, vote for a very high value. This will allow
@@ -358,13 +380,6 @@ static int lmh_set_max_limit(int cpu, u32 freq)
 		 */
 			hw->cdev_data[idx].max_freq =
 				(freq == hw->max_freq[idx]) ? U32_MAX : freq;
-#ifdef ASUS_ZS661KS_PROJECT
-			if(cpu==7){
-			  therm_cpu7_max_limit = freq;
-			  pr_info("cpu=%d, therm_cpu7_max_limit=%u", cpu, therm_cpu7_max_limit);
-			}
-#endif
-	  	}
 		if (max_freq > hw->cdev_data[idx].max_freq)
 			max_freq = hw->cdev_data[idx].max_freq;
 		idx++;
@@ -600,6 +615,45 @@ static int limits_dcvs_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
+	/* Check legcay LMH HW enablement is needed or not */
+	if (of_property_read_bool(dn, "qcom,legacy-lmh-enable")) {
+		/* Enable the thermal algorithm early */
+		ret = limits_dcvs_write(hw->affinity, LIMITS_SUB_FN_THERMAL,
+			 LIMITS_ALGO_MODE_ENABLE, 1, 0, 0);
+		if (ret) {
+			pr_err("Unable to enable THERM algo for cluster%d\n",
+				affinity);
+			return ret;
+		}
+		/* Enable the LMH outer loop algorithm */
+		ret = limits_dcvs_write(hw->affinity, LIMITS_SUB_FN_CRNT,
+			 LIMITS_ALGO_MODE_ENABLE, 1, 0, 0);
+		if (ret) {
+			pr_err("Unable to enable CRNT algo for cluster%d\n",
+				affinity);
+			return ret;
+		}
+		/* Enable the Reliability algorithm */
+		ret = limits_dcvs_write(hw->affinity, LIMITS_SUB_FN_REL,
+			 LIMITS_ALGO_MODE_ENABLE, 1, 0, 0);
+		if (ret) {
+			pr_err("Unable to enable REL algo for cluster%d\n",
+				affinity);
+			return ret;
+		}
+		/* Enable the BCL algorithm */
+		ret = limits_dcvs_write(hw->affinity, LIMITS_SUB_FN_BCL,
+			 LIMITS_ALGO_MODE_ENABLE, 1, 0, 0);
+		if (ret) {
+			pr_err("Unable to enable BCL algo for cluster%d\n",
+				affinity);
+			return ret;
+		}
+		ret = enable_lmh();
+		if (ret)
+			return ret;
+	}
+
 	no_cdev_register = of_property_read_bool(dn,
 				"qcom,no-cooling-device-register");
 
@@ -640,11 +694,13 @@ static int limits_dcvs_probe(struct platform_device *pdev)
 			return PTR_ERR(tzdev);
 	}
 
-	hw->min_freq_reg = devm_ioremap(&pdev->dev, min_reg, 0x4);
-	if (!hw->min_freq_reg) {
-		pr_err("min frequency enable register remap failed\n");
-		ret = -ENOMEM;
-		goto unregister_sensor;
+	if (!no_cdev_register) {
+		hw->min_freq_reg = devm_ioremap(&pdev->dev, min_reg, 0x4);
+		if (!hw->min_freq_reg) {
+			pr_err("min frequency enable register remap failed\n");
+			ret = -ENOMEM;
+			goto unregister_sensor;
+		}
 	}
 
 	mutex_init(&hw->access_lock);

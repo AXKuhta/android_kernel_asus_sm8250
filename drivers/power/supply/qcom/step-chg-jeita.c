@@ -24,7 +24,7 @@
 			&& (value) <= (right)))
 
 #define BATT_TYPE_TEMP  "4439538_asus_tequila_4830mah_averaged_masterslave_apr21st2020"
-#define BATT_TYPE_OBIWAN_4P35V	"c11p1901_5800mah_jan22nd2020_4p35v" //ASUS_BSP for OBIWAN
+#define BATT_TYPE_OBIWAN_4P35V	"c11p1901_5800mah_apr29th2019_4p35v" //ASUS_BSP for OBIWAN
 
 struct step_chg_cfg {
 	struct step_chg_jeita_param	param;
@@ -852,7 +852,7 @@ int qcom_step_chg_init(struct device *dev,
 	if (!chip)
 		return -ENOMEM;
 
-	chip->step_chg_ws = wakeup_source_register("qcom-step-chg");
+	chip->step_chg_ws = wakeup_source_register(dev, "qcom-step-chg");
 	if (!chip->step_chg_ws)
 		return -EINVAL;
 

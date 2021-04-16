@@ -373,6 +373,7 @@ static int rpm_stats_resume(struct device *dev)
 		printk("[RPM] Resume: status: Mode: %s, Count: %d\n", stat_type, data.count);
 		if( i==0 )
 		{
+			ASUSEvtlog("[RPM] Resume: status: Mode: %s, Count: %d\n", stat_type, data.count);
 			if(pre_aosd_count == data.count)
 			{
 				need_dump_rpmh_master_stat=true;

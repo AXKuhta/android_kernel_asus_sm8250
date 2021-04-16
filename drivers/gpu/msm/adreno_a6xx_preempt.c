@@ -27,6 +27,7 @@ static void _update_wptr(struct adreno_device *adreno_dev, bool reset_timer)
 	struct adreno_ringbuffer *rb = adreno_dev->cur_rb;
 	unsigned long flags;
 	int ret = 0;
+	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 
 	spin_lock_irqsave(&rb->preempt_lock, flags);
 
@@ -36,10 +37,29 @@ static void _update_wptr(struct adreno_device *adreno_dev, bool reset_timer)
 		 * dispatcher context. Do it now.
 		 */
 		if (rb->skip_inline_wptr) {
+			/*
+			 * There could be a situation where GPU comes out of
+			 * ifpc after a fenced write transaction but before
+			 * reading AHB_FENCE_STATUS from KMD, it goes back to
+			 * ifpc due to inactivity (kernel scheduler plays a
+			 * role here). Thus, the GPU could technically be
+			 * re-collapsed between subsequent register writes
+			 * leading to a prolonged preemption sequence. The
+			 * keepalive bit prevents any further power collapse
+			 * while it is set.
+			 */
+			if (gmu_core_isenabled(device))
+				gmu_core_regrmw(device, A6XX_GMU_AO_SPARE_CNTL,
+					0x0, 0x2);
 
 			ret = adreno_gmu_fenced_write(adreno_dev,
 				ADRENO_REG_CP_RB_WPTR, rb->wptr,
 				FENCE_STATUS_WRITEDROPPED0_MASK);
+
+			/* Clear the keep alive */
+			if (gmu_core_isenabled(device))
+				gmu_core_regrmw(device, A6XX_GMU_AO_SPARE_CNTL,
+					0x2, 0x0);
 
 			reset_timer = true;
 			rb->skip_inline_wptr = false;
@@ -145,7 +165,7 @@ static void _a6xx_preemption_fault(struct adreno_device *adreno_dev)
 	if (kgsl_state_is_awake(device)) {
 		adreno_readreg(adreno_dev, ADRENO_REG_CP_PREEMPT, &status);
 
-		if (status == 0) {
+		if (!(status & 0x1)) {
 			adreno_set_preempt_state(adreno_dev,
 				ADRENO_PREEMPT_COMPLETE);
 
@@ -155,7 +175,7 @@ static void _a6xx_preemption_fault(struct adreno_device *adreno_dev)
 	}
 
 	dev_err(device->dev,
-		     "Preemption timed out: cur=%d R/W=%X/%X, next=%d R/W=%X/%X\n",
+		     "Preemption Fault: cur=%d R/W=0x%x/0x%x, next=%d R/W=0x%x/0x%x\n",
 		     adreno_dev->cur_rb->id,
 		     adreno_get_rptr(adreno_dev->cur_rb),
 		     adreno_dev->cur_rb->wptr,
@@ -388,10 +408,15 @@ void a6xx_preemption_trigger(struct adreno_device *adreno_dev)
 
 	return;
 err:
-
-	/* If fenced write fails, set the fault and trigger recovery */
+	/* If fenced write fails, take inline snapshot and trigger recovery */
+	if (!in_interrupt()) {
+		gmu_core_snapshot(device);
+		adreno_set_gpu_fault(adreno_dev,
+			ADRENO_GMU_FAULT_SKIP_SNAPSHOT);
+	} else {
+		adreno_set_gpu_fault(adreno_dev, ADRENO_GMU_FAULT);
+	}
 	adreno_set_preempt_state(adreno_dev, ADRENO_PREEMPT_NONE);
-	adreno_set_gpu_fault(adreno_dev, ADRENO_GMU_FAULT);
 	adreno_dispatcher_schedule(device);
 	/* Clear the keep alive */
 	if (gmu_core_isenabled(device))
@@ -760,13 +785,13 @@ void a6xx_preemption_context_destroy(struct kgsl_context *context)
 	struct kgsl_device *device = context->device;
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
 
-	if (!adreno_is_preemption_enabled(adreno_dev))
+	if (!ADRENO_FEATURE(adreno_dev, ADRENO_PREEMPTION))
 		return;
 
 	gpumem_free_entry(context->user_ctxt_record);
 
 	/* Put the extra ref from gpumem_alloc_entry() */
-	kgsl_mem_entry_put(context->user_ctxt_record);
+	kgsl_mem_entry_put_deferred(context->user_ctxt_record);
 }
 
 int a6xx_preemption_context_init(struct kgsl_context *context)
@@ -775,7 +800,7 @@ int a6xx_preemption_context_init(struct kgsl_context *context)
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
 	uint64_t flags = 0;
 
-	if (!adreno_is_preemption_enabled(adreno_dev))
+	if (!ADRENO_FEATURE(adreno_dev, ADRENO_PREEMPTION))
 		return 0;
 
 	if (context->flags & KGSL_CONTEXT_SECURE)

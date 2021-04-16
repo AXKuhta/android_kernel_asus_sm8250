@@ -35,10 +35,6 @@
 
 #include <video/mipi_display.h>
 
-#ifdef ZS670KS
-extern int zs670ks_panel_id;
-#endif
-
 /**
  * DOC: dsi helpers
  *
@@ -1062,22 +1058,9 @@ EXPORT_SYMBOL(mipi_dsi_dcs_set_tear_scanline);
 int mipi_dsi_dcs_set_display_brightness(struct mipi_dsi_device *dsi,
 					u16 brightness)
 {
-
-#ifdef ASUS_ZS661KS_PROJECT
+	//u8 payload[2] = { brightness & 0xff, brightness >> 8 };
 	u8 payload[2] = { brightness >> 8 , brightness & 0xff };
-#else
-	u8 payload[2] = { brightness >> 8 , brightness & 0xff };
-#endif
 	ssize_t err;
-
-#ifdef ZS670KS
-	if(  zs670ks_panel_id == 1)	
-	{
-		payload[0] = 0x0F;
-		payload[1] = 0xFF;
-		
-	}
-#endif
 
 	err = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_DISPLAY_BRIGHTNESS,
 				 payload, sizeof(payload));

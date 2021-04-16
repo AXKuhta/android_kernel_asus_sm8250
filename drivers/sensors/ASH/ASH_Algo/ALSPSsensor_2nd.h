@@ -46,7 +46,7 @@
  * driver will cat first correct adc/lux value.
  */
 #define LIGHT_TURNON_DELAY_TIME			(10)
-#define PROXIMITY_TURNON_DELAY_TIME	(50)
+#define PROXIMITY_TURNON_DELAY_TIME	(10)
 
 #define PROXIMITY_POLLING_TIME			(1000)
 #define LIGHT_POLLING_TIME			(500)

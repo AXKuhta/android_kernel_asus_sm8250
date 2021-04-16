@@ -32,6 +32,7 @@
 #include <linux/debugfs.h>
 #include <linux/proc_fs.h>
 #include <linux/list.h>
+#include <linux/timekeeping.h>
 #include <net/net_namespace.h>
 #include "sla_stats.h"
 
@@ -48,10 +49,12 @@
 
 #define MAC_HEADER_LENGTH 14
 
+#define MMAP_FILE_NAME_SIZE 21
+#define STAT_FILE_NAME_SIZE 22
+
 static struct sla_config config_data;
 static u64 pkt_alloc_num = 0;
 static u64 pkt_free_num = 0;
-
 
 LIST_HEAD(sla_iface_list) ;
 
@@ -131,6 +134,7 @@ static inline void stats_unlock(void)
     spin_unlock(&stats_spin_lock);
     
 }
+
 /*
 static spinlock_t list_spin_lock;
 
@@ -344,6 +348,7 @@ static unsigned int sla_ipv4_in(void *priv,
         
         iface->total_trfc += skb->len;
         
+        
         entry = &p->entries[p->cur_idx];
         entry->link_type = LT_DOWNLINK;
         entry->timestamp = timestamp;
@@ -407,7 +412,9 @@ static unsigned int sla_ipv4_out(void *priv,
         }
         p = iface->mmap_struct;
         
+
         pkt_add(ntohs(tcp_hdr(skb)->source));
+
         
         entry = &p->entries[p->cur_idx];
         entry->link_type = LT_UPLINK;
@@ -679,11 +686,13 @@ static void sla_stats_disable(void)
        printk(KERN_ERR "### %s removed form list %s %p \n", __func__, iface->interface_name, iface );
 
        kfree(iface);
-    } 
+    }
     pkt_hlist_deinit();
     STATS_UNLOCK_IRQ(&stats_spin_lock,flags);
 
     printk(KERN_CRIT "### %s out of disable funk \n", __func__);
+
+    pkt_hlist_deinit();
 }
 
 
@@ -700,11 +709,9 @@ static void sla_stats_enable(void)
 
     //sla_stats_disable();
     //sla_stats_remove_file(); 
-
     STATS_LOCK_IRQ(&stats_spin_lock,flags);
     pkt_hlist_init();
     STATS_UNLOCK_IRQ(&stats_spin_lock,flags);
-
     config_data.enable = 1;
     config_data.rate_on = 1;
 }
@@ -934,8 +941,8 @@ static int __init sla_static_collector_init(void)
     printk("#### %s in version V 3.0 \n", __func__);
 
     err = register_pernet_subsys(&sla_net_ops);
-
     stats_lock_init();
+
 
     sla_dir = proc_mkdir("sla", NULL);
 

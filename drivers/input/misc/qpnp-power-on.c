@@ -28,7 +28,7 @@
 #include <linux/reboot.h>
 
 #ifdef ZS670KS
-#include <linux/wakelock.h>
+#include <linux/pm_wakeup.h>
 #endif
 
 #ifdef CONFIG_PON_EVT_LOG
@@ -266,7 +266,7 @@ static DEFINE_SPINLOCK(spon_list_slock);
 static LIST_HEAD(spon_dev_list);
 
 #ifdef ZS670KS
-static struct wake_lock pk_wake_lock;
+extern struct wakeup_source *pk_wake_lock;
 extern bool g_Charger_mode;
 #endif
 
@@ -274,9 +274,6 @@ static u32 s1_delay[PON_S1_COUNT_MAX + 1] = {
 	0, 32, 56, 80, 138, 184, 272, 408, 608, 904, 1352, 2048, 3072, 4480,
 	6720, 10256
 };
-
-static u32 gresin_irq = 0;
-static bool gresin_irq_enable = false;
 
 static const char * const qpnp_pon_reason[] = {
 	[0] = "Triggered from Hard Reset",
@@ -338,21 +335,6 @@ static const char * const qpnp_poff_reason[] = {
 	[38] = "Triggered from S3_RESET_PBS_NACK",
 	[39] = "Triggered from S3_RESET_KPDPWR_ANDOR_RESIN",
 };
-
-int asus_enable_resin_irq_wake(bool en)
-{
-	if(en && gresin_irq_enable == false) {
-		printk("[d_keypad] enable resin irq\n");
-		enable_irq_wake(gresin_irq);
-		gresin_irq_enable = true;
-	} else if(!en && gresin_irq_enable == true ) {
-		printk("[d_keypad] disable resin irq\n");
-		disable_irq_wake(gresin_irq);
-		gresin_irq_enable = false;
-	}
-
-	return 0;
-}
 
 static int
 qpnp_pon_masked_write(struct qpnp_pon *pon, u16 addr, u8 mask, u8 val)
@@ -1188,34 +1170,6 @@ static struct qpnp_pon_config *qpnp_get_cfg(struct qpnp_pon *pon, u32 pon_type)
 
 	return NULL;
 }
-
-//ASUS_bsp add module for powerkey+++++++
-#if defined(ASUS_FTM_BUILD) && defined(ZS670KS)
-static int pwrkey_mode = 0;
-static int pwrkeyMode_function(const char *val,const struct kernel_param *kp)
-{
-    int ret = 0;
-    int old_val = pwrkey_mode;
-    if(ret)
-     return ret;
-    if(pwrkey_mode > 0xf) {
-        pwrkey_mode = old_val;
-        return -EINVAL;
-    }
-    ret= param_set_int(val,kp);
-    if(pwrkey_mode == 0){
-        printk("[mid_powerbtn] Normal_Mode!\n");
-    }else if(pwrkey_mode==1){
-        printk("[mid_powerbtn] Debug_Mode! \n");
-    }
-    printk("[mid_powerbtn]pwrkeyMode_function pwrkey_mode =  %d\n",pwrkey_mode);
-    return 0;
-}
-
-module_param_call(pwrkey_mode,pwrkeyMode_function,param_get_int,&pwrkey_mode,0644);
-#endif
-//ASUS_BSP add module for powerkey-----------
-
 extern unsigned int vol_up_press;
 unsigned int vol_down_press_count = 0;
 extern void set_dload_mode(int on);
@@ -1243,7 +1197,7 @@ static int qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 		elapsed_us = ktime_us_delta(ktime_get(),
 				pon->kpdpwr_last_release_time);
 		if (elapsed_us < pon->dbc_time_us) {
-			printk("[d_keypad] Ignoring kpdpwr event; within debounce time. (elapsed_us=%d, pon->dbc_time_us=%d) \n", elapsed_us, pon->dbc_time_us);
+			pr_debug("Ignoring kpdpwr event; within debounce time\n");
 			return 0;
 		}
 	}
@@ -1323,10 +1277,7 @@ static int qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 
 #ifdef ZS670KS
 	if(cfg->key_code == 116 && g_Charger_mode) {
-		if(!pk_wake_lock.ws.name){
-			wake_lock_init(&pk_wake_lock, WAKE_LOCK_SUSPEND, "pk_wake_lock");
-		}
-		wake_lock_timeout(&pk_wake_lock, msecs_to_jiffies(1000));
+		__pm_wakeup_event(pk_wake_lock, 1000);
 	}
 #endif
 
@@ -1355,25 +1306,6 @@ static int qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 		input_report_key(pon->pon_input, cfg->key_code, 1);
 		input_sync(pon->pon_input);
 	}
-	
-//<ASUS-BSP>for add module for powerkey+++++++
-#if defined(ASUS_FTM_BUILD) && defined(ZS670KS)
-	if(pwrkey_mode == 1){
-		if(cfg->key_code == KEY_POWER){
-			printk("[mid_powerbtn]pwrkey mode\n");
-			cfg->key_code = KEY_A;
-		}
-	}else{
-		if(cfg->key_code == KEY_A){
-			cfg->key_code = KEY_POWER;
-		}
-		printk("[mid_powerbtn]normal mode\n");
-	}
-    printk("[mid_powerbtn]cfg->key_code = %d, state=%s\n",cfg->key_code,key_status?"press":"release");
-    printk("[mid_powerbtn]pwrkey_mode =  %d\n",pwrkey_mode);
-#endif
-
-//<ASUS-BSP>for add module for powerkey------
 
 	input_report_key(pon->pon_input, cfg->key_code, key_status);
 	input_sync(pon->pon_input);
@@ -1725,11 +1657,6 @@ qpnp_pon_request_irqs(struct qpnp_pon *pon, struct qpnp_pon_config *cfg)
 
 	/* Mark the interrupts wakeable if they support linux-key */
 	if (cfg->key_code) {
-	printk("[d_keypad] key_code=%d irq=%d \n",cfg->key_code, cfg->state_irq);
-
-	if(gresin_irq == cfg->state_irq)
-		asus_enable_resin_irq_wake(1);
-	else
 		enable_irq_wake(cfg->state_irq);
 
 		/* Special handling for RESIN due to a hardware bug */
@@ -1819,8 +1746,6 @@ static int qpnp_pon_config_resin_init(struct qpnp_pon *pon,
 		return cfg->state_irq;
 	}
 
-	gresin_irq = cfg->state_irq;
-	printk("[d_keypad] gresin_irq=%d \n",gresin_irq);
 	rc = of_property_read_u32(node, "qcom,support-reset",
 				  &cfg->support_reset);
 	if (rc) {
@@ -2060,7 +1985,6 @@ static int qpnp_pon_config_init(struct qpnp_pon *pon,
 		cfg->pull_up = of_property_read_bool(cfg_node, "qcom,pull-up");
 	}
 
-
 	pmic_wd_bark_irq = platform_get_irq_byname(pdev, "pmic-wd-bark");
 	/* Request the pmic-wd-bark irq only if it is defined */
 	if (pmic_wd_bark_irq >= 0) {
@@ -2110,12 +2034,6 @@ static int qpnp_pon_config_init(struct qpnp_pon *pon,
 		if (rc)
 			return rc;
 	}
-
-#if defined(ASUS_FTM_BUILD) && defined(ZS670KS)
-    if (pon->pon_input) {
-        input_set_capability(pon->pon_input, EV_KEY, KEY_A);
-    }
-#endif
 
 	device_init_wakeup(pon->dev, true);
 
@@ -2929,8 +2847,6 @@ static int qpnp_pon_probe(struct platform_device *pdev)
 
 	qpnp_pon_debugfs_init(pon);
 
-	asus_enable_resin_irq_wake(0);
-
 	return 0;
 }
 
@@ -2938,10 +2854,6 @@ static int qpnp_pon_remove(struct platform_device *pdev)
 {
 	struct qpnp_pon *pon = platform_get_drvdata(pdev);
 	unsigned long flags;
-
-#ifdef ZS670KS
-	wake_lock_destroy(&pk_wake_lock);
-#endif
 
 	device_remove_file(&pdev->dev, &dev_attr_debounce_us);
 

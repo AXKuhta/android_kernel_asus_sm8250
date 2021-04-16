@@ -54,19 +54,18 @@ static const char * const power_supply_usb_type_text[] = {
 	"PD", "PD_DRP", "PD_PPS", "BrickID"
 };
 
-#ifdef ASUS_ZS661KS_PROJECT
-static const char * const power_supply_status_text[] = {  //ASUS BSP charger +++
-	"Unknown", "Charging", "Discharging", "Not charging", "Full",
-	"Quick charging", "Quick charging plus", "Hyper charging", "Quick full", "Quick full plus", "Hyper full",
-	"Thermal Alert", "Thermal Alert No Cable"
-};
-#else
+#ifdef ZS670KS
 static const char * const power_supply_status_text[] = {
 	"Unknown", "Charging", "Discharging", "Not charging", "Full"
 };
 
 static const char * const power_supply_asus_status_text[] = {
 	"Charging", "Quick charging", "Quick charging plus", "Hyper charging", "Thermal Alert"
+};
+#else
+static const char * const power_supply_status_text[] = {  //ASUS BSP charger +++
+	"Unknown", "Charging", "Discharging", "Not charging", "Full",
+	"Quick charging", "Quick charging plus", "Thermal Alert"
 };
 #endif
 
@@ -244,20 +243,12 @@ static ssize_t power_supply_show_property(struct device *dev,
 	case POWER_SUPPLY_PROP_CHARGE_COUNTER_EXT:
 		ret = sprintf(buf, "%lld\n", value.int64val);
 		break;
-/* ASUS BSP : Add for NXP +++ */
-#ifdef ASUS_ZS661KS_PROJECT
-#ifdef CONFIG_DUAL_PD_PORT
-	case POWER_SUPPLY_PROP_PD_PORT:
-		ret = sprintf(buf, "%lld\n", value.int64val);
-		break;	
-#endif
-#else
+#ifdef ZS670KS
 	case POWER_SUPPLY_PROP_ASUS_STATUS:
 		ret = sprintf(buf, "%s\n",
 			      power_supply_asus_status_text[value.intval]);
 		break;
 #endif
-/* ASUS BSP : Add for NXP --- */
 	case POWER_SUPPLY_PROP_MODEL_NAME ... POWER_SUPPLY_PROP_SERIAL_NUMBER:
 		ret = sprintf(buf, "%s\n", value.strval);
 		break;
@@ -532,21 +523,13 @@ static struct device_attribute power_supply_attrs[] = {
 	POWER_SUPPLY_ATTR(cp_ilim),
 	POWER_SUPPLY_ATTR(irq_status),
 	POWER_SUPPLY_ATTR(parallel_output_mode),
+	POWER_SUPPLY_ATTR(fg_type),
+	POWER_SUPPLY_ATTR(charger_status),
 	/* Local extensions of type int64_t */
 	POWER_SUPPLY_ATTR(charge_counter_ext),
-	/* ASUS BSP : Add for NXP +++ */
-#ifdef ASUS_ZS661KS_PROJECT
-#ifdef CONFIG_DUAL_PD_PORT
-	POWER_SUPPLY_ATTR(nxp_pd_port),
-	POWER_SUPPLY_ATTR(nxp_pd_cap),
-#endif
-	/* ASUS BSP Add +++ */
-	POWER_SUPPLY_ATTR(pd2_active),
-	/* ASUS BSP Add --- */
-#else
+#ifdef ZS670KS
 	POWER_SUPPLY_ATTR(asus_status),
 #endif
-	/* ASUS BSP : Add for NXP --- */
 	/* Properties of type `const char *' */
 	POWER_SUPPLY_ATTR(model_name),
 	POWER_SUPPLY_ATTR(manufacturer),

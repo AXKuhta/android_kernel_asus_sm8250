@@ -315,6 +315,7 @@
 		vdda-1p2-supply = <&pm8150_l9>;
 		vdda-0p9-supply = <&pm8150_l18>;
 
+		status = "disabled";
 		reg =   <0xae90000 0x0dc>,
 			<0xae90200 0x0c0>,
 			<0xae90400 0x508>,

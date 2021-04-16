@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2002,2007-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2002,2007-2020, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/sched/clock.h>
@@ -74,6 +74,8 @@ static void adreno_get_submit_time(struct adreno_device *adreno_dev,
 static void adreno_ringbuffer_wptr(struct adreno_device *adreno_dev,
 		struct adreno_ringbuffer *rb)
 {
+	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
+	struct adreno_gpudev *gpudev = ADRENO_GPU_DEVICE(adreno_dev);
 	unsigned long flags;
 	int ret = 0;
 
@@ -85,7 +87,18 @@ static void adreno_ringbuffer_wptr(struct adreno_device *adreno_dev,
 			 * Let the pwrscale policy know that new commands have
 			 * been submitted.
 			 */
-			kgsl_pwrscale_busy(KGSL_DEVICE(adreno_dev));
+			kgsl_pwrscale_busy(device);
+
+			/*
+			 * There could be a situation where GPU comes out of
+			 * ifpc after a fenced write transaction but before
+			 * reading AHB_FENCE_STATUS from KMD, it goes back to
+			 * ifpc due to inactivity (kernel scheduler plays a
+			 * role here). Put a keep alive vote to avoid such
+			 * unlikely scenario.
+			 */
+			if (gpudev->gpu_keepalive)
+				gpudev->gpu_keepalive(adreno_dev, true);
 
 			/*
 			 * Ensure the write posted after a possible
@@ -95,6 +108,9 @@ static void adreno_ringbuffer_wptr(struct adreno_device *adreno_dev,
 				ADRENO_REG_CP_RB_WPTR, rb->_wptr,
 				FENCE_STATUS_WRITEDROPPED0_MASK);
 			rb->skip_inline_wptr = false;
+			if (gpudev->gpu_keepalive)
+				gpudev->gpu_keepalive(adreno_dev, false);
+
 		}
 	} else {
 		/*
@@ -110,9 +126,14 @@ static void adreno_ringbuffer_wptr(struct adreno_device *adreno_dev,
 	spin_unlock_irqrestore(&rb->preempt_lock, flags);
 
 	if (ret) {
-		/* If WPTR update fails, set the fault and trigger recovery */
-		adreno_set_gpu_fault(adreno_dev, ADRENO_GMU_FAULT);
-		adreno_dispatcher_schedule(KGSL_DEVICE(adreno_dev));
+		/*
+		 * If WPTR update fails, take inline snapshot and trigger
+		 * recovery.
+		 */
+		gmu_core_snapshot(device);
+		adreno_set_gpu_fault(adreno_dev,
+			ADRENO_GMU_FAULT_SKIP_SNAPSHOT);
+		adreno_dispatcher_schedule(device);
 	}
 }
 

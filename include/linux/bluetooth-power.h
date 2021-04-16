@@ -73,10 +73,8 @@ struct bluetooth_power_platform_data {
 	struct bt_power_vreg_data *bt_vdd_rfa1;
 	/* VDD RFA2 digital voltage regulator */
 	struct bt_power_vreg_data *bt_vdd_rfa2;
-#ifndef ASUS_ZS661KS_PROJECT
 	/* VDD ASD digital voltage regulator */
 	struct bt_power_vreg_data *bt_vdd_asd;
-#endif
 	/* Optional: chip power down gpio-regulator
 	 * chip power down data is required when bluetooth module
 	 * and other modules like wifi co-exist in a single chip and
@@ -95,7 +93,7 @@ int get_chipset_version(void);
 #define BT_CMD_SLIM_TEST            0xbfac
 #define BT_CMD_PWR_CTRL             0xbfad
 #define BT_CMD_CHIPSET_VERS         0xbfae
-#define BT_CMD_GETVAL_RESET_GPIO    0xbfaf
+#define BT_CMD_GETVAL_RESET_GPIO    0xbfb5
 #define BT_CMD_GETVAL_SW_CTRL_GPIO  0xbfb0
 #define BT_CMD_GETVAL_VDD_AON_LDO   0xbfb1
 #define BT_CMD_GETVAL_VDD_DIG_LDO   0xbfb2

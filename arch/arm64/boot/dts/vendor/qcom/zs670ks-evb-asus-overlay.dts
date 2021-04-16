@@ -897,7 +897,6 @@ mcu_pin_int_disable: mcu_pin_int_disable {
  *    ====================================
  */
  
-// ASUS_BSP +++ ClayWang vcnl36866 
 &apps_rsc {
 
 	rpmh-regulator-ldoa10 {
@@ -994,7 +993,6 @@ mcu_pin_int_disable: mcu_pin_int_disable {
 	};
 
 };
-// ASUS_BSP --- ClayWang vcnl36866 
 
 /*    ====================================
  *    overlay for kona-regulator.dtsi - end
@@ -1164,6 +1162,11 @@ mcu_pin_int_disable: mcu_pin_int_disable {
 /* [ABSP] Add for MCU UART logs*/
 &qupv3_se17_4uart {
 	status = "ok";
+};
+
+&pm8150l_lpg{
+qcom,lut-patterns = <20 20 20 20 0 0 0 0 0 0 0
+						0 0 0 0 0 0 0 0 0 0>;
 };
 
 /*    ====================================

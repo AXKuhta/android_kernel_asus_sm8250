@@ -22,9 +22,6 @@
 *.gcno
 *.gz
 *.i
-!drivers/input/touchscreen/focaltech_touch_ft8719/include/pramboot/*.i
-!drivers/input/touchscreen/focaltech_touch_ft8719/include/firmware/*.i
-!drivers/input/touchscreen/focaltech_touch_3518U/include/firmware/*.i
 *.ko
 *.lex.c
 *.ll
@@ -138,3 +135,9 @@ all.config
 
 # fetched Android config fragments
 kernel/configs/android-*.cfg
+
+# vendor device tree directories
+arch/arm64/boot/dts/vendor
+
+# Tech package directories
+techpack/
